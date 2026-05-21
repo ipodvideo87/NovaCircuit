@@ -21,6 +21,13 @@ export function runERC(graph: ProjectGraph): ERCIssue[] {
     issues.push({ id: `ERR-${nextId++}`, severity: 'error', message: msg, relatedComponents: comps, relatedNets: nets });
   };
 
+  // Create an O(1) map of components for fast lookup
+  const componentsMap = new Map<string, any>();
+  graph.components.forEach(c => {
+    if (c.id) componentsMap.set(c.id, c);
+    if (c.designator) componentsMap.set(c.designator, c);
+  });
+
   const connectedPins = new Set<string>();
   
   // Prepare Net Names
@@ -75,7 +82,7 @@ export function runERC(graph: ProjectGraph): ERCIssue[] {
   const hasGround = graph.nets.some(n => 
     n.type === 'ground' || 
     n.connections.some(conn => {
-      const comp = graph.components.find(c => c.id === conn.componentId || c.designator === conn.componentId);
+      const comp = componentsMap.get(conn.componentId);
       if (comp) {
         const pin = comp.pins.find(p => p.name === conn.pinName);
         return pin && pin.type === 'ground';
@@ -110,12 +117,18 @@ export function runERC(graph: ProjectGraph): ERCIssue[] {
     const visited = new Set<string>();
     let subcircuits = 0;
 
-    const dfs = (node: string) => {
-      visited.add(node);
-      const neighbors = adj.get(node) || [];
-      for (const n of neighbors) {
-        if (!visited.has(n)) {
-          dfs(n);
+    const dfs = (startNode: string) => {
+      const stack = [startNode];
+      visited.add(startNode);
+      while (stack.length > 0) {
+        const node = stack.pop()!;
+        const neighbors = adj.get(node) || [];
+        for (let i = 0; i < neighbors.length; i++) {
+          const neighbor = neighbors[i];
+          if (!visited.has(neighbor)) {
+            visited.add(neighbor);
+            stack.push(neighbor);
+          }
         }
       }
     };

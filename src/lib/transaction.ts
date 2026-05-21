@@ -27,7 +27,7 @@ export function deepCloneGraph(graph: ProjectGraph): ProjectGraph {
 }
 
 export function useTransactionManager(initialState: ProjectGraph, maxHistory = 50) {
-  const [history, setHistory] = useState<ProjectGraph[]>([deepCloneGraph(initialState)]);
+  const [history, setHistory] = useState<ProjectGraph[]>(() => [deepCloneGraph(initialState)]);
   const [currentIndex, setCurrentIndex] = useState(0);
 
   const historyRef = useRef(history);
@@ -55,7 +55,7 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
       const newIndex = indexRef.current - 1;
       indexRef.current = newIndex;
       setCurrentIndex(newIndex);
-      return deepCloneGraph(historyRef.current[newIndex]);
+      return historyRef.current[newIndex];
     }
     return null;
   }, []);
@@ -65,13 +65,13 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
       const newIndex = indexRef.current + 1;
       indexRef.current = newIndex;
       setCurrentIndex(newIndex);
-      return deepCloneGraph(historyRef.current[newIndex]);
+      return historyRef.current[newIndex];
     }
     return null;
   }, []);
 
   const rollback = useCallback((): ProjectGraph => {
-    return deepCloneGraph(historyRef.current[indexRef.current]);
+    return historyRef.current[indexRef.current];
   }, []);
 
   return {

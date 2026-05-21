@@ -13,16 +13,19 @@ export function runDRC(board: PCBBoard): DRCViolation[] {
 
   // 1. Basic Component Overlap Check (Bounding Box)
   for (let i = 0; i < board.components.length; i++) {
+    const c1 = board.components[i];
     for (let j = i + 1; j < board.components.length; j++) {
-      const c1 = board.components[i];
       const c2 = board.components[j];
       
-      // Simple distance heuristic for now. Real implementation needs footprint bounding boxes.
+      // Fast-exit coordinate bounding-box check
       const dx = c1.x - c2.x;
+      if (Math.abs(dx) >= 3) continue;
       const dy = c1.y - c2.y;
-      const dist = Math.sqrt(dx*dx + dy*dy);
+      if (Math.abs(dy) >= 3) continue;
       
-      if (dist < 3) {
+      // Squared distance check completely avoids expensive Math.sqrt calls
+      const distSq = dx*dx + dy*dy;
+      if (distSq < 9) {
         violations.push({
           id: `overlap-${c1.id}-${c2.id}`,
           type: "overlap",

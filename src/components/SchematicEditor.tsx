@@ -43,6 +43,8 @@ import {
   Undo2, 
   Redo2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Info,
   MessageSquare,
   Sparkles,
@@ -557,7 +559,7 @@ const initialProjectGraph: ProjectGraph = {
   }))
 };
 
-const TraceInspectorList = React.memo(function TraceInspectorList({ traces, replayIndex, goToStep }: { traces: any[], replayIndex: number | null, goToStep: (i: number) => void }) {
+const TraceInspectorList = React.memo(function TraceInspectorList({ traces, replayIndex, goToStep, mode }: { traces: any[], replayIndex: number | null, goToStep: (i: number) => void, mode?: 'live' | 'replay' | 'inspect' }) {
   if (traces.length === 0) {
     return (
       <div className="text-center py-8">
@@ -584,14 +586,18 @@ const TraceInspectorList = React.memo(function TraceInspectorList({ traces, repl
 const SimWaveform = React.memo(function SimWaveform({ count, baseHeight, variation, color, duration, delayStep }: { count: number, baseHeight: number, variation: number, color: string, duration: number, delayStep: number }) {
    return (
       <div className="flex-1 flex items-end gap-[1px]">
-         {Array.from({ length: count }).map((_, i) => (
-           <motion.div 
-             key={i} 
-             className={`flex-1 ${color} rounded-t-[0.5px]`}
-             animate={{ height: [`${baseHeight + Math.random() * variation}%`, `${baseHeight + Math.random() * variation}%`] }}
-             transition={{ repeat: Infinity, duration, delay: i * delayStep }}
-           />
-         ))}
+         {Array.from({ length: count }).map((_, i) => {
+           const h1 = baseHeight + ((Math.sin(i * 1.5) + 1) / 2) * variation;
+           const h2 = baseHeight + ((Math.cos(i * 2.1) + 1) / 2) * variation;
+           return (
+             <motion.div 
+               key={i} 
+               className={`flex-1 ${color} rounded-t-[0.5px]`}
+               animate={{ height: [`${h1}%`, `${h2}%`] }}
+               transition={{ repeat: Infinity, duration, delay: i * delayStep }}
+             />
+           );
+         })}
       </div>
    );
 });
@@ -759,6 +765,21 @@ const TraceRow = React.memo(({ trace, i, isReplaying, onGoToStep }: { trace: AIE
   );
 });
 
+const EMPTY_ARRAY: string[] = [];
+
+function isSameAction(a: any, b: any): boolean {
+  if (a.name !== b.name) return false;
+  const argsA = a.args || {};
+  const argsB = b.args || {};
+  const keysA = Object.keys(argsA);
+  const keysB = Object.keys(argsB);
+  if (keysA.length !== keysB.length) return false;
+  for (const k of keysA) {
+    if (argsA[k] !== argsB[k]) return false;
+  }
+  return true;
+}
+
 export default function SchematicEditor() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
@@ -788,12 +809,32 @@ export default function SchematicEditor() {
     replayGraph
   } = useReplayEngine(executionTraces);
 
+  // Unified UI Mode
+  const mode: 'live' | 'replay' | 'inspect' = useMemo(() => {
+    if (replayIndex !== null) return 'replay';
+    if (traceInspectorOpen) return 'inspect';
+    return 'live';
+  }, [replayIndex, traceInspectorOpen]);
+
+  const isInteractive = mode === 'live';
+  const isReadOnly = mode !== 'live';
+
+  // Centralized Event Gate
+  const canInteract = useCallback((actionType?: string) => {
+    if (mode !== 'live') return false;
+    if (isProcessingActions.current) return false;
+    return true;
+  }, [mode]);
+
   const { history, currentIndex, commitTransaction, rollback, undo, redo, canUndo, canRedo } = useTransactionManager(initialProjectGraph);
 
   const activeGraph = replayGraph ?? history[currentIndex];
 
-  const selectedIdsStr = nodes.filter((n: any) => n.selected).map((n: any) => n.id).join(',');
-  const memoizedSelectedIds = useMemo(() => selectedIdsStr ? selectedIdsStr.split(',') : [], [selectedIdsStr]);
+  const selectedIdsStr = useMemo(() => {
+    if (view !== 'pcb') return '';
+    return nodes.filter((n: any) => n.selected).map((n: any) => n.id).join(',');
+  }, [nodes, view]);
+  const memoizedSelectedIds = useMemo(() => selectedIdsStr ? selectedIdsStr.split(',') : EMPTY_ARRAY, [selectedIdsStr]);
   const handlePcbSelect = useCallback((id: string) => {
     setNodes(ns => ns.map(n => ({ ...n, selected: n.id === id })));
   }, [setNodes]);
@@ -802,7 +843,7 @@ export default function SchematicEditor() {
   const prevDiffEdges = useRef<any>(null);
 
   const diffResult = useMemo(() => {
-    if (replayIndex !== null && executionTraces.current[replayIndex] && diffModeEnabled) {
+    if (mode === 'replay' && replayIndex !== null && executionTraces.current[replayIndex] && diffModeEnabled) {
       console.time('computeDiffOverlay');
       const res = computeDiffOverlay(
         executionTraces.current[replayIndex].beforeGraph, 
@@ -818,13 +859,13 @@ export default function SchematicEditor() {
     prevDiffNodes.current = null;
     prevDiffEdges.current = null;
     return null;
-  }, [replayIndex, diffModeEnabled]);
+  }, [mode, replayIndex, diffModeEnabled]);
 
   const prevMapNodes = useRef<any>(null);
   const prevMapEdges = useRef<any>(null);
 
   const mapResult = useMemo(() => {
-    if (replayIndex !== null && replayGraph && !diffModeEnabled) {
+    if (mode === 'replay' && replayIndex !== null && replayGraph && !diffModeEnabled) {
       console.time('mapGraphToFlow');
       const res = mapGraphToFlow(replayGraph, prevMapNodes.current, prevMapEdges.current);
       prevMapNodes.current = res.nodes;
@@ -835,46 +876,51 @@ export default function SchematicEditor() {
     prevMapNodes.current = null;
     prevMapEdges.current = null;
     return null;
-  }, [replayIndex, diffModeEnabled, replayGraph]);
+  }, [mode, replayIndex, diffModeEnabled, replayGraph]);
 
   const displayNodes = diffResult ? diffResult.nodes : (mapResult ? mapResult.nodes : nodes);
   const displayEdges = diffResult ? diffResult.edges : (mapResult ? mapResult.edges : edges);
 
   useEffect(() => {
-    if (replayIndex !== null) {
+    if (mode === 'replay') {
       // In a real scenario we'd use a useLayoutEffect on the rendered items, but this works for simple profiling
       requestAnimationFrame(() => {
         try { console.timeEnd('replayStepRender'); } catch (e) {}
       });
     }
-  }, [replayIndex]);
+  }, [mode]);
 
   useEffect(() => {
     // DRC Warnings are driven purely by transaction results now.
     
+    let rAFId: number | null = null;
     const checkMobile = () => {
-      const width = window.innerWidth;
-      const mobile = width < 768;
-      setIsMobile(mobile);
-      
-      // Only force state changes if the layout mode (mobile/desktop) actually changes
-      const modeChanged = (width < 768) !== (lastWidth.current < 768);
-      if (modeChanged) {
-        if (mobile) {
-          setSidebarOpen(false);
-          setCopilotOpen(false);
-        } else {
-          setSidebarOpen(true);
-          setCopilotOpen(true);
+      if (rAFId) cancelAnimationFrame(rAFId);
+      rAFId = requestAnimationFrame(() => {
+        const width = window.innerWidth;
+        const mobile = width < 768;
+        setIsMobile(prev => prev !== mobile ? mobile : prev);
+        
+        // Only force state changes if the layout mode (mobile/desktop) actually changes
+        const modeChanged = (width < 768) !== (lastWidth.current < 768);
+        if (modeChanged) {
+          if (mobile) {
+            setSidebarOpen(false);
+            setCopilotOpen(false);
+          } else {
+            setSidebarOpen(true);
+            setCopilotOpen(true);
+          }
         }
-      }
-      lastWidth.current = width;
+        lastWidth.current = width;
+      });
     };
     checkMobile();
     window.addEventListener('resize', checkMobile);
 
     return () => {
       window.removeEventListener('resize', checkMobile);
+      if (rAFId) cancelAnimationFrame(rAFId);
     };
   }, []);
 
@@ -941,10 +987,10 @@ export default function SchematicEditor() {
       const { exitReplay: exit, rollback: rb, commitTransaction: commit, applyGraphToEditor: apply } = handleAiActionsDeps.current;
       
       exit();
-      let workingGraph = rb();
+      const sessionBeforeGraph = rb();
+      let workingGraph = sessionBeforeGraph;
       let finalGraphToCommit: ProjectGraph | null = null;
       
-      const sessionBeforeGraph = rb();
       const sessionInputActions: AIAction[] = [];
       const sessionValidatedActions: AIAction[] = [];
       const sessionExplanations: string[] = [];
@@ -953,7 +999,6 @@ export default function SchematicEditor() {
         while (actionQueue.current.length > 0) {
           const { actions: currentActions, explanation } = actionQueue.current.shift()!;
           if (explanation) sessionExplanations.push(explanation);
-          const beforeBatchGraph = deepCloneGraph(workingGraph);
 
           // Yield to event loop to prevent blocking React render
           await new Promise(resolve => setTimeout(resolve, 0));
@@ -967,9 +1012,10 @@ export default function SchematicEditor() {
 
           // 2. Transaction Check
           if (isRejected) {
+            const beforeBatchGraph = deepCloneGraph(workingGraph);
             // Track Execution Trace (Rejected) immediately
             const validationMap = currentActions.map(a => validActions.some(
-                va => va.name === a.name && JSON.stringify(va.args) === JSON.stringify(a.args)
+                va => isSameAction(va, a)
             ));
             executionTraces.current = [...executionTraces.current, {
               inputActions: currentActions,
@@ -1035,7 +1081,7 @@ export default function SchematicEditor() {
           
           // Create ONE finalized AIExecutionTrace object
           const validationMap = sessionInputActions.map(a => sessionValidatedActions.some(
-              va => va.name === a.name && JSON.stringify(va.args) === JSON.stringify(a.args)
+              va => isSameAction(va, a)
           ));
           executionTraces.current = [...executionTraces.current, {
             inputActions: sessionInputActions,
@@ -1065,7 +1111,7 @@ export default function SchematicEditor() {
   }, []);
 
   const onConnect = useCallback((params: Connection) => {
-    if (isProcessingActions.current) return;
+    if (!canInteract('connect')) return;
     handleAiActions([{
       name: 'connect_net',
       args: {
@@ -1073,22 +1119,22 @@ export default function SchematicEditor() {
         to: `${params.target}.${params.targetHandle || '1'}`
       }
     }], "Manual connection");
-  }, [handleAiActions]);
+  }, [handleAiActions, canInteract]);
 
   const handleNodesChange = useCallback((changes: any) => {
-    if (replayIndex === null && !isProcessingActions.current) {
+    if (canInteract('nodes_change')) {
       onNodesChange(changes);
     }
-  }, [replayIndex, onNodesChange, isProcessingActions]);
+  }, [onNodesChange, canInteract]);
 
   const handleEdgesChange = useCallback((changes: any) => {
-    if (replayIndex === null && !isProcessingActions.current) {
+    if (canInteract('edges_change')) {
       onEdgesChange(changes);
     }
-  }, [replayIndex, onEdgesChange, isProcessingActions]);
+  }, [onEdgesChange, canInteract]);
 
   const handleNodeDragStop = useCallback((event: any, node: any) => {
-    if (replayIndex !== null || isProcessingActions.current) return;
+    if (!canInteract('drag_stop')) return;
     handleAiActions([{
       name: 'move_component',
       args: {
@@ -1097,9 +1143,10 @@ export default function SchematicEditor() {
         y: node.position.y
       }
     }], "Manual component move");
-  }, [replayIndex, isProcessingActions, handleAiActions]);
+  }, [handleAiActions, canInteract]);
 
   const handleUndo = useCallback(() => {
+    if (!canInteract('undo')) return;
     if (canUndo) {
       const pastGraph = undo();
       if (pastGraph) {
@@ -1107,9 +1154,10 @@ export default function SchematicEditor() {
          setDrcWarnings(prev => [`INFO: Undid previous action.`, ...prev].slice(0, 5));
       }
     }
-  }, [canUndo, undo, applyGraphToEditor]);
+  }, [canUndo, undo, applyGraphToEditor, canInteract]);
 
   const handleRedo = useCallback(() => {
+    if (!canInteract('redo')) return;
     if (canRedo) {
       const futureGraph = redo();
       if (futureGraph) {
@@ -1117,7 +1165,7 @@ export default function SchematicEditor() {
          setDrcWarnings(prev => [`INFO: Redid previous action.`, ...prev].slice(0, 5));
       }
     }
-  }, [canRedo, redo, applyGraphToEditor]);
+  }, [canRedo, redo, applyGraphToEditor, canInteract]);
 
   const topNavigation = useMemo(() => (
       <header className="h-12 border-b border-white/10 flex items-center justify-between px-3 md:px-4 z-[100] bg-[#0d0d0d] shrink-0">
@@ -1273,24 +1321,24 @@ export default function SchematicEditor() {
                   </button>
                 )}
                 <div className="flex items-center gap-1 md:bg-white/5 rounded-lg md:p-0.5">
-                  {replayIndex !== null ? (
+                  {mode === 'replay' ? (
                     <>
                       <button 
                         onClick={prev}
                         className="p-1.5 rounded-md transition-all text-gray-400 hover:text-white"
                         title="Previous Replay Step"
                       >
-                        <Undo2 size={16}/>
+                        <ChevronLeft size={16}/>
                       </button>
                       <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-widest px-2">
-                        Replay: {replayIndex + 1} / {executionTraces.current.length}
+                        Replay: {(replayIndex ?? 0) + 1} / {executionTraces.current.length}
                       </span>
                       <button 
                         onClick={next}
                         className="p-1.5 rounded-md transition-all text-gray-400 hover:text-white"
                         title="Next Replay Step"
                       >
-                        <Redo2 size={16}/>
+                        <ChevronRight size={16}/>
                       </button>
                       <button
                         onClick={() => setDiffModeEnabled(!diffModeEnabled)}
@@ -1332,15 +1380,23 @@ export default function SchematicEditor() {
                         { icon: <Activity size={16}/>, id: 'simulate' },
                         { icon: <Play size={16}/>, id: 'replay', action: () => { if (executionTraces.current.length > 0) goToStep(0); } },
                         { icon: <List size={16}/>, id: 'trace_inspector', action: () => setTraceInspectorOpen(!traceInspectorOpen) }
-                      ].map((tool, i) => (
-                        <button key={i} onClick={tool.action} className={cn(
-                          "p-1.5 rounded-md transition-all",
-                          i === 0 ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/20" : 
-                          tool.id === 'replay' && executionTraces.current.length === 0 ? "text-gray-700 opacity-50 cursor-not-allowed" : "text-gray-500 hover:text-white"
-                        )}>
-                          {tool.icon}
-                        </button>
-                      ))}
+                      ].map((tool, i) => {
+                        const isActive = (tool.id === 'select' && mode === 'live') ||
+                                         (tool.id === 'trace_inspector' && mode === 'inspect');
+                        return (
+                          <button 
+                            key={i} 
+                            onClick={tool.action} 
+                            className={cn(
+                              "p-1.5 rounded-md transition-all",
+                              isActive ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/20" : 
+                              tool.id === 'replay' && executionTraces.current.length === 0 ? "text-gray-700 opacity-50 cursor-not-allowed" : "text-gray-500 hover:text-white"
+                            )}
+                          >
+                            {tool.icon}
+                          </button>
+                        );
+                      })}
                     </>
                   )}
                 </div>
@@ -1364,9 +1420,13 @@ export default function SchematicEditor() {
              </div>
           </div>
   ), [
-    isMobile, mobileMenuOpen, replayIndex, diffModeEnabled, canUndo, canRedo, traceInspectorOpen,
-    prev, next, exitReplay, handleUndo, handleRedo, goToStep
+    isMobile, mobileMenuOpen, mode, replayIndex, diffModeEnabled, canUndo, canRedo,
+    prev, next, exitReplay, handleUndo, handleRedo, goToStep, traceCount
   ]);
+
+  const copilotElement = useMemo(() => (
+    <FluxCopilot onAiAction={handleAiActions} projectState={activeGraph} />
+  ), [handleAiActions, activeGraph]);
 
   const rightSidebars = useMemo(() => {
      if (isMobile) return null;
@@ -1376,55 +1436,59 @@ export default function SchematicEditor() {
               "w-72 border-l border-white/10 flex flex-col bg-[#0d0d0d] z-10 transition-all",
               sidebarOpen ? "translate-x-0" : "translate-x-full w-0 border-none"
             )}>
-              <div className="p-4 h-12 border-b border-white/10 flex items-center justify-between shrink-0">
-                <h2 className="text-xs font-black text-gray-100 flex items-center gap-2 uppercase tracking-widest">
-                  <div className="w-1 h-3 bg-indigo-500 rounded-full" />
-                  Inspector
-                </h2>
-                <Settings size={14} className="text-gray-600" />
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-5 space-y-8 scrollbar-hide">
-                <section>
-                  <h3 className="text-[10px] text-gray-600 uppercase tracking-widest font-extrabold mb-4">Geometry</h3>
-                  <div className="grid grid-cols-2 gap-3">
-                    {['X', 'Y', 'ROT', 'SCALE'].map(label => (
-                      <div key={label} className="space-y-1.5">
-                        <label className="text-[9px] text-gray-600 font-black uppercase tracking-tighter">{label}</label>
-                        <input type="text" value="0.00" className="w-full bg-[#1a1a1a] border border-white/5 rounded-lg px-2.5 py-2 text-[11px] text-white font-mono focus:ring-1 focus:ring-indigo-500 outline-none" readOnly />
-                      </div>
-                    ))}
+              {sidebarOpen && (
+                <>
+                  <div className="p-4 h-12 border-b border-white/10 flex items-center justify-between shrink-0">
+                    <h2 className="text-xs font-black text-gray-100 flex items-center gap-2 uppercase tracking-widest">
+                      <div className="w-1 h-3 bg-indigo-500 rounded-full" />
+                      Inspector
+                    </h2>
+                    <Settings size={14} className="text-gray-600" />
                   </div>
-                </section>
 
-                <section>
-                  <h3 className="text-[10px] text-gray-600 uppercase tracking-widest font-extrabold mb-4">Part Metadata</h3>
-                  <div className="space-y-4">
-                    {[
-                      { label: 'Reference', value: 'U1' },
-                      { label: 'Manufacturer', value: 'Espressif Systems' },
-                      { label: 'Part Number', value: 'ESP32-S3-WROOM-1' },
-                      { label: 'Datasheet', value: 'PDF Link' },
-                      { label: 'Operating Temp', value: '-40°C to 85°C' }
-                    ].map((attr, i) => (
-                      <div key={i} className="flex items-center justify-between border-b border-white/5 pb-2">
-                        <span className="text-[11px] text-gray-500 font-bold">{attr.label}</span>
-                        <span className="text-[11px] text-gray-300 font-mono text-right truncate ml-2">{attr.value}</span>
+                  <div className="flex-1 overflow-y-auto p-5 space-y-8 scrollbar-hide">
+                    <section>
+                      <h3 className="text-[10px] text-gray-600 uppercase tracking-widest font-extrabold mb-4">Geometry</h3>
+                      <div className="grid grid-cols-2 gap-3">
+                        {['X', 'Y', 'ROT', 'SCALE'].map(label => (
+                          <div key={label} className="space-y-1.5">
+                            <label className="text-[9px] text-gray-600 font-black uppercase tracking-tighter">{label}</label>
+                            <input type="text" value="0.00" className="w-full bg-[#1a1a1a] border border-white/5 rounded-lg px-2.5 py-2 text-[11px] text-white font-mono focus:ring-1 focus:ring-indigo-500 outline-none" readOnly />
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                </section>
+                    </section>
 
-                <div className="p-4 bg-indigo-500/10 border border-indigo-500/20 rounded-2xl">
-                   <div className="flex items-center gap-2 mb-2">
-                      <Zap size={14} className="text-indigo-400" />
-                      <span className="text-[10px] font-black uppercase text-indigo-300">Net Intelligence</span>
-                   </div>
-                   <p className="text-[10px] text-indigo-400 leading-relaxed italic opacity-80">
-                     Copilot suggests adding a 10uF decoupling capacitor between VCC and GND for hardware stability.
-                   </p>
-                </div>
-              </div>
+                    <section>
+                      <h3 className="text-[10px] text-gray-600 uppercase tracking-widest font-extrabold mb-4">Part Metadata</h3>
+                      <div className="space-y-4">
+                        {[
+                          { label: 'Reference', value: 'U1' },
+                          { label: 'Manufacturer', value: 'Espressif Systems' },
+                          { label: 'Part Number', value: 'ESP32-S3-WROOM-1' },
+                          { label: 'Datasheet', value: 'PDF Link' },
+                          { label: 'Operating Temp', value: '-40°C to 85°C' }
+                        ].map((attr, i) => (
+                          <div key={i} className="flex items-center justify-between border-b border-white/5 pb-2">
+                            <span className="text-[11px] text-gray-500 font-bold">{attr.label}</span>
+                            <span className="text-[11px] text-gray-300 font-mono text-right truncate ml-2">{attr.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+
+                    <div className="p-4 bg-indigo-500/10 border border-indigo-500/20 rounded-2xl">
+                       <div className="flex items-center gap-2 mb-2">
+                          <Zap size={14} className="text-indigo-400" />
+                          <span className="text-[10px] font-black uppercase text-indigo-300">Net Intelligence</span>
+                       </div>
+                       <p className="text-[10px] text-indigo-400 leading-relaxed italic opacity-80">
+                         Copilot suggests adding a 10uF decoupling capacitor between VCC and GND for hardware stability.
+                       </p>
+                    </div>
+                  </div>
+                </>
+              )}
             </aside>
 
             {/* Copilot Sidebar */}
@@ -1433,7 +1497,7 @@ export default function SchematicEditor() {
               copilotOpen ? "w-80" : "w-0 border-none"
             )}>
               <div className="w-80 h-full">
-                <FluxCopilot onAiAction={handleAiActions} projectState={activeGraph} />
+                {copilotElement}
               </div>
             </div>
             
@@ -1455,7 +1519,7 @@ export default function SchematicEditor() {
             </div>
           </div>
      );
-  }, [isMobile, sidebarOpen, copilotOpen, activeGraph, handleAiActions]);
+  }, [isMobile, sidebarOpen, copilotOpen, copilotElement]);
 
   const mobileBottomNavigation = useMemo(() => {
      if (!isMobile) return null;
@@ -1532,15 +1596,16 @@ export default function SchematicEditor() {
           </div>
           <div className="flex-1 overflow-y-auto space-y-3 pr-1 scrollbar-hide">
             <TraceInspectorList 
-              traces={executionTraces.current} 
+              traces={[...executionTraces.current]} 
               replayIndex={replayIndex} 
+              mode={mode}
               goToStep={goToStep} 
             />
           </div>
         </motion.div>
       )}
     </AnimatePresence>
-  ), [traceInspectorOpen, replayIndex, goToStep]);
+  ), [traceInspectorOpen, replayIndex, mode, goToStep, traceCount]);
 
   return (
     <div className="flex flex-col h-[100dvh] overflow-hidden bg-[#0a0a0a] font-sans text-gray-200">
@@ -1580,15 +1645,22 @@ export default function SchematicEditor() {
                     onlyRenderVisibleElements={true}
                     minZoom={0.05}
                     maxZoom={5}
-                    nodesDraggable={replayIndex === null && !isProcessingActions.current}
-                    nodesConnectable={replayIndex === null && !isProcessingActions.current}
-                    elementsSelectable={replayIndex === null && !isProcessingActions.current}
+                    nodesDraggable={isInteractive}
+                    nodesConnectable={isInteractive}
+                    elementsSelectable={isInteractive}
                     onNodeDragStop={handleNodeDragStop}
                   >
                     <Background variant={BackgroundVariant.Lines} gap={20} size={1} color="#111" />
                     <Controls showInteractive={false} className="bg-[#1a1a1a] !border-white/10 !shadow-2xl" />
                     
-                    <Panel position="top-right" className="bg-[#0d0d0d]/90 backdrop-blur border border-white/10 rounded-xl p-1 flex gap-1 shadow-2xl z-20">
+                    {isReadOnly && (
+                      <Panel position="top-center" className="bg-amber-500/15 backdrop-blur border border-amber-500/30 text-amber-400 text-[10px] p-2 px-3 rounded-xl flex items-center gap-2 shadow-2xl z-20">
+                        <Info size={14} className="animate-pulse text-amber-400" />
+                        <span className="font-extrabold uppercase tracking-widest">{mode === 'replay' ? 'Replay Mode' : 'Inspect Mode'} Active &mdash; Editor is Read-Only</span>
+                      </Panel>
+                    )}
+
+                    <Panel position="top-right" className="bg-[#0d0d0d]/90 backdrop-blur border border-white/10 rounded-xl p-1 flex gap-1 shadow-2xl z-20 font-sans">
                       {['SCHEMATIC', 'PCB', '3D'].map((v) => (
                         <button 
                           key={v}
@@ -1706,6 +1778,7 @@ export default function SchematicEditor() {
                     graph={activeGraph} 
                     selectedIds={memoizedSelectedIds} 
                     onSelect={handlePcbSelect}
+                    mode={mode}
                   />
                 </motion.div>
               ) : (

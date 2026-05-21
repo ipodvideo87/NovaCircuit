@@ -28,7 +28,7 @@ interface FluxCopilotProps {
   projectState?: ProjectGraph;
 }
 
-export default function FluxCopilot({ onAiAction, projectState }: FluxCopilotProps) {
+export default React.memo(function FluxCopilot({ onAiAction, projectState }: FluxCopilotProps) {
   const [messages, setMessages] = useState<Message[]>([
     { 
       role: 'assistant', 
@@ -40,6 +40,11 @@ export default function FluxCopilot({ onAiAction, projectState }: FluxCopilotPro
   const [isTyping, setIsTyping] = useState(false);
   const [currentTask, setCurrentTask] = useState<string>('');
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const projectStateRef = useRef(projectState);
+  useEffect(() => {
+    projectStateRef.current = projectState;
+  }, [projectState]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -68,7 +73,7 @@ export default function FluxCopilot({ onAiAction, projectState }: FluxCopilotPro
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
           messages: newMessages,
-          projectState
+          projectState: projectStateRef.current
         })
       });
 
@@ -115,7 +120,6 @@ export default function FluxCopilot({ onAiAction, projectState }: FluxCopilotPro
 
       if (mappedActions.length > 0 && onAiAction) {
         console.log("=== CALLING onAiAction WITH ===", JSON.stringify(data.actions, null, 2));
-        alert("Actions received: " + JSON.stringify(data.actions, null, 2));
         onAiAction(mappedActions, content);
       }
     } catch (error) {
@@ -287,4 +291,6 @@ export default function FluxCopilot({ onAiAction, projectState }: FluxCopilotPro
       </div>
     </div>
   );
-}
+}, (prev, next) => {
+  return prev.onAiAction === next.onAiAction;
+});

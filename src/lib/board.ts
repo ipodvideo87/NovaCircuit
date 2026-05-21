@@ -89,6 +89,17 @@ export interface PCBBoard {
 const padDerivationCache = new Map<string, { hash: string, pads: BoardPad[] }>();
 
 export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
+  // Prune padDerivationCache of any components that no longer exist in the graph
+  const activeCompIds = new Set<string>();
+  for (let i = 0; i < graph.components.length; i++) {
+    activeCompIds.add(graph.components[i].id);
+  }
+  for (const compId of padDerivationCache.keys()) {
+    if (!activeCompIds.has(compId)) {
+      padDerivationCache.delete(compId);
+    }
+  }
+
   const board: PCBBoard = {
     components: [],
     nets: [],
@@ -121,7 +132,12 @@ export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
 
     if (fpDef) {
        // Stable positional hashing
-       const compNetIds = fpDef.pads.map(p => padToNetMap.get(`${comp.id}:${p.id}`) || 'none').join(',');
+       let compNetIds = '';
+       const padsLen = fpDef.pads.length;
+       for (let i = 0; i < padsLen; i++) {
+         compNetIds += (padToNetMap.get(`${comp.id}:${fpDef.pads[i].id}`) || 'none');
+         if (i < padsLen - 1) compNetIds += ',';
+       }
        const hash = `${bx}:${by}:${rotation}:${layer}:${comp.footprint}:${compNetIds}`;
        
        const cached = padDerivationCache.get(comp.id);
@@ -167,6 +183,14 @@ export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
     });
   });
 
+  // Create O(1) physical pad map to eliminate quadratic nested array traversal in ratnest generation
+  const physicalPadMap = new Map<string, BoardPad>();
+  board.components.forEach(c => {
+    c.pads.forEach(p => {
+      physicalPadMap.set(`${c.id}:${p.id}`, p);
+    });
+  });
+
   // Sync Nets
   graph.nets.forEach(net => {
     const bnet: BoardNet = {
@@ -183,12 +207,9 @@ export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
      const padLocs: {x: number, y: number}[] = [];
      
      net.pads.forEach(p => {
-       const bcomp = board.components.find(c => c.id === p.componentId);
-       if (bcomp) {
-         const bpad = bcomp.pads.find(pad => pad.id === p.padId);
-         if (bpad) {
-           padLocs.push({x: bpad.x, y: bpad.y});
-         }
+       const bpad = physicalPadMap.get(`${p.componentId}:${p.padId}`);
+       if (bpad) {
+         padLocs.push({x: bpad.x, y: bpad.y});
        }
      });
 
