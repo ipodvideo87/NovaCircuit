@@ -1,0 +1,8 @@
+{
+  "name": "Flux Intel PCB",
+  "description": "Professional AI-native PCB design engine with a built-in Expert Engineering Agent. Features physics-based reasoning, IPC-standard routing, and intelligent design reviews.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
