@@ -12,7 +12,7 @@ import {
   Box,
   Info
 } from 'lucide-react';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '@/src/lib/utils';
 import { ProjectGraph } from '../types';
 import { syncBoardFromGraph } from '../lib/board';
@@ -147,7 +147,10 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
   const isReadOnly = mode !== 'live';
 
   const [zoom, setZoom] = useState(1);
+  const lastTouchDistRef = useRef<number | null>(null);
+  const initialTouchZoomRef = useRef<number>(1);
   const [isMobile, setIsMobile] = useState(false);
+  const [mobileLayersOpen, setMobileLayersOpen] = useState(false);
   const [layers, setLayers] = useState([
     { id: 'F.Cu', name: 'Top Layer', color: 'bg-red-500', visible: true },
     { id: 'B.Cu', name: 'Bottom Layer', color: 'bg-blue-500', visible: true },
@@ -178,6 +181,7 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
   const drcViolations = useMemo(() => runDRC(board), [board]);
 
   const startAutoFix = () => {
+    if (isReadOnly) return;
     if (intervalRef.current) clearInterval(intervalRef.current);
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
 
@@ -249,7 +253,33 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
       )}
 
       {/* Main Canvas Area */}
-      <main className="flex-1 relative bg-[radial-gradient(#1a1a1a_1px,transparent_1px)] bg-[size:40px_40px] flex items-center justify-center overflow-hidden">
+      <main 
+        onTouchStart={(e) => {
+          if (e.touches.length === 2) {
+            const dist = Math.hypot(
+              e.touches[0].clientX - e.touches[1].clientX,
+              e.touches[0].clientY - e.touches[1].clientY
+            );
+            lastTouchDistRef.current = dist;
+            initialTouchZoomRef.current = zoom;
+          }
+        }}
+        onTouchMove={(e) => {
+          if (e.touches.length === 2 && lastTouchDistRef.current !== null) {
+            const dist = Math.hypot(
+              e.touches[0].clientX - e.touches[1].clientX,
+              e.touches[0].clientY - e.touches[1].clientY
+            );
+            const ratio = dist / lastTouchDistRef.current;
+            const nextZoom = Math.min(3, Math.max(0.15, initialTouchZoomRef.current * ratio));
+            setZoom(nextZoom);
+          }
+        }}
+        onTouchEnd={() => {
+          lastTouchDistRef.current = null;
+        }}
+        className="flex-1 relative bg-[radial-gradient(#1a1a1a_1px,transparent_1px)] bg-[size:40px_40px] flex items-center justify-center overflow-hidden"
+      >
         {isReadOnly && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-amber-500/15 backdrop-blur border border-amber-500/30 text-amber-400 text-[10px] px-3 py-1.5 rounded-full flex items-center gap-2 shadow-2xl z-40">
             <Info size={14} className="animate-pulse text-amber-400" />
@@ -323,19 +353,90 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
         </motion.div>
 
         {/* Floating View Controls */}
-        <div className="absolute bottom-6 md:bottom-10 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-[#0d0d0d]/90 backdrop-blur border border-white/10 p-1.5 rounded-full shadow-2xl z-40">
-           <button onClick={() => setZoom(z => Math.max(0.2, z - 0.2))} className="p-2 text-gray-400 hover:text-white transition-colors"><Maximize2 size={14} className="rotate-45" /></button>
+        <div className="absolute bottom-6 md:bottom-10 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-[#0d0d0d]/90 backdrop-blur border border-white/10 p-1 rounded-full shadow-2xl z-40">
+           <button onClick={() => setZoom(z => Math.max(0.2, z - 0.2))} className="p-3 md:p-2 text-gray-400 hover:text-white transition-colors min-w-[44px] min-h-[44px] md:min-w-0 md:min-h-0 flex items-center justify-center cursor-pointer active:scale-95"><Maximize2 size={14} className="rotate-45" /></button>
            <div className="h-4 w-[1px] bg-white/10" />
            <span className="text-[10px] font-mono font-bold text-gray-300 w-10 text-center">{Math.round(zoom * 100)}%</span>
            <div className="h-4 w-[1px] bg-white/10" />
-           <button onClick={() => setZoom(z => Math.min(3, z + 0.2))} className="p-2 text-gray-400 hover:text-white transition-colors"><Maximize2 size={14} /></button>
+           <button onClick={() => setZoom(z => Math.min(3, z + 0.2))} className="p-3 md:p-2 text-gray-400 hover:text-white transition-colors min-w-[44px] min-h-[44px] md:min-w-0 md:min-h-0 flex items-center justify-center cursor-pointer active:scale-95"><Maximize2 size={14} /></button>
         </div>
 
         {/* Mobile Mini-Layers Toggle */}
         {isMobile && (
-          <div className="absolute top-4 left-4 flex flex-col gap-2">
-            <button className="p-3 bg-white/5 backdrop-blur border border-white/10 rounded-2xl text-white">
+          <div className="absolute top-4 left-4 z-40 flex flex-col gap-2">
+            <button 
+              onClick={() => setMobileLayersOpen(!mobileLayersOpen)}
+              className={cn(
+                "p-3 rounded-2xl text-white transition-all min-w-[44px] min-h-[44px] flex items-center justify-center cursor-pointer",
+                mobileLayersOpen ? "bg-indigo-600 border border-indigo-500 shadow-lg shadow-indigo-600/30" : "bg-[#0d0d0d]/90 backdrop-blur border border-white/10"
+              )}
+            >
               <Layers size={18} />
+            </button>
+            
+            <AnimatePresence>
+              {mobileLayersOpen && (
+                <motion.div 
+                  initial={{ opacity: 0, scale: 0.95, y: -10 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.95, y: -10 }}
+                  className="w-48 bg-[#0d0d0d]/95 backdrop-blur-xl border border-white/10 rounded-2xl p-3 shadow-2xl flex flex-col gap-2.5 mt-1"
+                >
+                  <p className="text-[8px] font-black uppercase tracking-[0.2em] text-zinc-500 border-b border-white/5 pb-1.5 mb-1">Active Layers</p>
+                  {layers.map(layer => (
+                    <div 
+                      key={layer.id} 
+                      onClick={() => toggleLayer(layer.id)}
+                      className="flex items-center justify-between cursor-pointer py-1 select-none active:opacity-75"
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className={cn("w-2.5 h-2.5 rounded-full", layer.color, !layer.visible && "opacity-20")} />
+                        <span className={cn("text-[9px] font-bold uppercase tracking-tight transition-colors", layer.visible ? "text-gray-300" : "text-gray-600")}>
+                          {layer.id}
+                        </span>
+                      </div>
+                      <div className={cn(
+                        "w-4 h-4 rounded border flex items-center justify-center transition-colors",
+                        layer.visible ? "bg-indigo-600/20 border-indigo-500 text-indigo-400" : "border-white/15 text-transparent"
+                      )}>
+                        <svg className="w-2.5 h-2.5 stroke-current" viewBox="0 0 24 24" fill="none" strokeWidth="4">
+                          <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                      </div>
+                    </div>
+                  ))}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
+
+        {/* Mobile Mini-DRC Floating Badge */}
+        {isMobile && (
+          <div className="absolute top-4 right-4 z-40">
+            <button 
+              onClick={startAutoFix}
+              disabled={isFixing || isReadOnly}
+              className={cn(
+                "p-3 rounded-2xl transition-all min-h-[44px] flex items-center gap-2 border shadow-lg cursor-pointer active:scale-95 text-[9px] font-black uppercase tracking-widest",
+                isFixing 
+                  ? "bg-indigo-600/20 border-indigo-500 text-indigo-400"
+                  : drcViolations.length === 0 
+                    ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" 
+                    : "bg-rose-500/10 border-rose-500/30 text-rose-400"
+              )}
+            >
+              <ShieldCheck size={16} className={isFixing ? "animate-spin" : ""} />
+              <span>
+                {isFixing 
+                  ? `Fixing: ${Math.round(fixProgress)}%` 
+                  : isReadOnly 
+                    ? "DRC Check (Read-Only)" 
+                    : drcViolations.length === 0 
+                      ? "DRC: Clean" 
+                      : `DRC: ${drcViolations.length} Errors`
+                }
+              </span>
             </button>
           </div>
         )}
