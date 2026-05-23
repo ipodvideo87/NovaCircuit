@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { ProjectGraph } from '../types';
 
 export function deepCloneGraph(graph: ProjectGraph): ProjectGraph {
@@ -23,15 +23,42 @@ export function deepCloneGraph(graph: ProjectGraph): ProjectGraph {
       restrictions: [...k.restrictions]
     })) : undefined,
     outline: graph.outline ? { points: graph.outline.points.map(p => ({ ...p })) } : undefined,
+    netClasses: graph.netClasses ? graph.netClasses.map(nc => ({
+      ...nc,
+      viaSize: nc.viaSize ? { ...nc.viaSize } : undefined
+    })) : undefined,
+    diffPairs: graph.diffPairs ? graph.diffPairs.map(dp => ({ ...dp })) : undefined,
   };
 }
 
+const CACHE_KEY = 'eda_autosave_v1';
+
 export function useTransactionManager(initialState: ProjectGraph, maxHistory = 50) {
-  const [history, setHistory] = useState<ProjectGraph[]>(() => [deepCloneGraph(initialState)]);
+  const [isRestored, setIsRestored] = useState(false);
+
+  const [history, setHistory] = useState<ProjectGraph[]>(() => {
+    try {
+      const cached = localStorage.getItem(CACHE_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && typeof parsed === 'object' && Array.isArray(parsed.components) && Array.isArray(parsed.nets)) {
+          // Found valid cache -> schedule restored flag
+          setTimeout(() => setIsRestored(true), 100);
+          return [parsed];
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to parse cached project.", err);
+    }
+    return [deepCloneGraph(initialState)];
+  });
   const [currentIndex, setCurrentIndex] = useState(0);
 
   const historyRef = useRef(history);
   const indexRef = useRef(currentIndex);
+  
+  // Throttle autosaves
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const commitTransaction = useCallback((newGraph: ProjectGraph) => {
     const trimmedHistory = historyRef.current.slice(0, indexRef.current + 1);
@@ -48,6 +75,17 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
     
     setHistory(nextHistory);
     setCurrentIndex(nextHistory.length - 1);
+
+    // Debounced autosave
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(() => {
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify(clonedGraph));
+      } catch (err) {
+        console.warn("Failed to autosave project", err);
+      }
+    }, 1000); // 1s throttle
+
   }, [maxHistory]);
 
   const undo = useCallback((): ProjectGraph | null => {
@@ -74,6 +112,8 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
     return historyRef.current[indexRef.current];
   }, []);
 
+  const clearRestoredFlag = useCallback(() => setIsRestored(false), []);
+
   return {
     history,
     currentIndex,
@@ -83,5 +123,7 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
     rollback,
     canUndo: currentIndex > 0,
     canRedo: currentIndex < history.length - 1,
+    isRestored,
+    clearRestoredFlag,
   };
 }

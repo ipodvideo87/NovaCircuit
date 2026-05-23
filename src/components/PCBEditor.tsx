@@ -17,17 +17,24 @@ import { cn } from '@/src/lib/utils';
 import { ProjectGraph } from '../types';
 import { syncBoardFromGraph } from '../lib/board';
 import { runDRC, DRCViolation } from '../lib/drc';
+import { generateGerberRS274X, generateExcellonDrill, generateIPCD356Netlist, generatePickAndPlaceCSV, generateBOMCSV } from '../lib/exporter';
+import { ThreeDBoardViewer } from './ThreeDBoardViewer';
 
-const RatsnestLayer = React.memo<{ board: ReturnType<typeof syncBoardFromGraph>; processScale: number }>(function RatsnestLayer({ board, processScale }) {
+const RatsnestLayer = React.memo<{ board: ReturnType<typeof syncBoardFromGraph>; processScale: number; isElementVisible?: (bx: number, by: number, radius?: number) => boolean }>(function RatsnestLayer({ board, processScale, isElementVisible }) {
   return (
     <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-50 z-10 overflow-visible">
-       {board.ratnest.map((line) => (
-          <path 
-            key={line.id}
-            d={`M ${line.startX * processScale + 50 * processScale} ${line.startY * processScale + 50 * processScale} L ${line.endX * processScale + 50 * processScale} ${line.endY * processScale + 50 * processScale}`} 
-            stroke="#a855f7" strokeWidth="1" strokeDasharray="2 2"
-          />
-       ))}
+       {board.ratnest.map((line) => {
+          if (isElementVisible && !isElementVisible(line.startX, line.startY, 2) && !isElementVisible(line.endX, line.endY, 2)) {
+             return null;
+          }
+          return (
+            <path 
+              key={line.id}
+              d={`M ${line.startX * processScale + 50 * processScale} ${line.startY * processScale + 50 * processScale} L ${line.endX * processScale + 50 * processScale} ${line.endY * processScale + 50 * processScale}`} 
+              stroke="#a855f7" strokeWidth="1" strokeDasharray="2 2"
+            />
+          );
+       })}
     </svg>
   );
 }, (prev, next) => {
@@ -65,7 +72,126 @@ const BoardOutlineOverlay = React.memo<{ outlinePoints: { x: number; y: number }
   return true;
 });
 
-const PCBComponentNode = React.memo<{ comp: any; isSelected: boolean; processScale: number; showLabels: boolean; isFCuVisible: boolean; isBCuVisible: boolean; isReadOnly?: boolean; onSelect?: (id: string) => void }>(function PCBComponentNode({ comp, isSelected, processScale, showLabels, isFCuVisible, isBCuVisible, isReadOnly = false, onSelect }) {
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export function generateSerpentineTrace(A: Point, B: Point, addedLen: number, spacing: number): Point[] {
+  const dx = B.x - A.x;
+  const dy = B.y - A.y;
+  const L = Math.hypot(dx, dy);
+  if (L < 1.0 || addedLen <= 0) {
+    return [A, B];
+  }
+  const ux = dx / L;
+  const uy = dy / L;
+  const px = -uy;
+  const py = ux;
+
+  const startRatio = 0.2;
+  const endRatio = 0.8;
+  const startPt = { x: A.x + ux * L * startRatio, y: A.y + uy * L * startRatio };
+  const endPt = { x: A.x + ux * L * endRatio, y: A.y + uy * L * endRatio };
+
+  const L_m = L * (endRatio - startRatio);
+  const cycles = 4;
+  const stepX = L_m / cycles;
+  
+  // Total vertical segments = cycles * 4 vertical runs
+  // Cap at 2.5mm to avoid clearance overlap errors
+  const H = Math.min(2.5, addedLen / (cycles * 4)); 
+
+  const points: Point[] = [A];
+  points.push(startPt);
+
+  for (let i = 0; i < cycles; i++) {
+    const cycleStartDist = startRatio * L + i * stepX;
+    
+    // Step 1: Upwards perpendicular bend
+    const p1 = cycleStartDist;
+    const pt1 = { x: A.x + ux * p1 + px * H, y: A.y + uy * p1 + py * H };
+    
+    // Step 2: Forward parallel bend
+    const p2 = cycleStartDist + stepX * 0.25;
+    const pt2 = { x: A.x + ux * p2 + px * H, y: A.y + uy * p2 + py * H };
+    
+    // Step 3: Cross over to down vertical loop
+    const pt3 = { x: A.x + ux * p2 - px * H, y: A.y + uy * p2 - py * H };
+    
+    // Step 4: Forward parallel bend
+    const p4 = cycleStartDist + stepX * 0.75;
+    const pt4 = { x: A.x + ux * p4 - px * H, y: A.y + uy * p4 - py * H };
+
+    // Step 5: Return to main track axis
+    const p5 = cycleStartDist + stepX;
+    const pt5 = { x: A.x + ux * p5, y: A.y + uy * p5 };
+
+    points.push(pt1, pt2, pt3, pt4, pt5);
+  }
+
+  points.push(endPt);
+  points.push(B);
+  return points;
+}
+
+export function findDiffPair(board: any, netId: string) {
+  // First check in board's stored diffPairs
+  if (board.diffPairs) {
+    const found = board.diffPairs.find((dp: any) => dp.positiveNetId === netId || dp.negativeNetId === netId);
+    if (found) return found;
+  }
+  
+  // Try to lookup from the associated board nets
+  const net = board.nets.find((n: any) => n.id === netId);
+  if (!net) return null;
+  
+  let isPositive = false;
+  let isNegative = false;
+  let baseName = "";
+  if (net.name.endsWith("+")) {
+    isPositive = true;
+    baseName = net.name.slice(0, -1);
+  } else if (net.name.endsWith("_P")) {
+    isPositive = true;
+    baseName = net.name.slice(0, -2);
+  } else if (net.name.endsWith("DP") && net.name !== "GND" && net.name !== "VCC") {
+    isPositive = true;
+    baseName = net.name.slice(0, -2);
+  } else if (net.name.endsWith("-")) {
+    isNegative = true;
+    baseName = net.name.slice(0, -1);
+  } else if (net.name.endsWith("_N")) {
+    isNegative = true;
+    baseName = net.name.slice(0, -2);
+  } else if (net.name.endsWith("DN") && net.name !== "GND" && net.name !== "VCC") {
+    isNegative = true;
+    baseName = net.name.slice(0, -2);
+  }
+
+  if (baseName) {
+    const positiveNames = [baseName + "+", baseName + "_P", baseName + "DP"];
+    const negativeNames = [baseName + "-", baseName + "_N", baseName + "DN"];
+    const posNet = board.nets.find((n: any) => positiveNames.includes(n.name));
+    const negNet = board.nets.find((n: any) => negativeNames.includes(n.name));
+    if (posNet && negNet) {
+      return {
+        id: `auto-dp-${baseName}`,
+        name: baseName,
+        positiveNetId: posNet.id,
+        negativeNetId: negNet.id,
+        spacing: 0.25, // mm spacing
+        width: 0.15, // mm trace width
+        skewTolerance: 0.5, // mm skew tolerance before DRC flag
+        targetImpedance: 90, // target differential impedance
+        maxUncoupledLength: 5.0
+      };
+    }
+  }
+  return null;
+}
+
+const PCBComponentNode = React.memo<{ comp: any; isSelected: boolean; processScale: number; showLabels: boolean; isFCuVisible: boolean; isBCuVisible: boolean; isReadOnly?: boolean; onSelect?: (id: string) => void; onPadClick?: (compId: string, padId: string, e: React.PointerEvent) => void; zoom?: number }>(function PCBComponentNode({ comp, isSelected, processScale, showLabels, isFCuVisible, isBCuVisible, isReadOnly = false, onSelect, onPadClick, zoom = 1 }) {
   return (
     <motion.div 
       className={cn(
@@ -73,7 +199,7 @@ const PCBComponentNode = React.memo<{ comp: any; isSelected: boolean; processSca
         isReadOnly ? "cursor-default" : "cursor-pointer hover:scale-[1.03] active:scale-[0.98]",
         isSelected && "z-30"
       )}
-      onClick={(e) => { 
+      onPointerDown={(e) => { 
         if (isReadOnly) return;
         e.stopPropagation(); 
         onSelect?.(comp.id); 
@@ -86,11 +212,16 @@ const PCBComponentNode = React.memo<{ comp: any; isSelected: boolean; processSca
     >
        <div className={cn("relative border -translate-x-1/2 -translate-y-1/2 flex items-center justify-center transition-colors", isSelected ? "border-indigo-500 shadow-[0_0_15px_#6366f1] bg-indigo-500/10" : "border-amber-500/30 bg-amber-500/5")} style={{ width: 10 * processScale, height: 10 * processScale }}>
           <span className={cn("text-[6px] font-mono whitespace-nowrap font-bold", isSelected ? "text-indigo-400" : "text-amber-500")}>{comp.designator}</span>
-          {comp.pads.map((pad: any) => {
+          {zoom >= 0.6 && comp.pads.map((pad: any) => {
             const padVisible = pad.layer === 'F.Cu' ? isFCuVisible : (pad.layer === 'B.Cu' ? isBCuVisible : true);
             if (!padVisible) return null;
             return (
-              <div key={pad.id} className={cn("absolute rounded-sm", pad.layer === 'F.Cu' ? 'bg-red-500/90 border border-red-500/30' : 'bg-blue-500/90 border border-blue-500/30', isSelected && 'ring-1 ring-white/50')}
+              <div key={pad.id} className={cn("absolute rounded-sm", pad.layer === 'F.Cu' ? 'bg-red-500/90 border border-red-500/30 cursor-crosshair hover:bg-red-400' : 'bg-blue-500/90 border border-blue-500/30 cursor-crosshair hover:bg-blue-400', isSelected && 'ring-1 ring-white/50')}
+                onPointerDown={(e) => {
+                   if (isReadOnly) return;
+                   e.stopPropagation();
+                   onPadClick?.(comp.id, pad.id, e);
+                }}
                 style={{
                   left: (pad.x - comp.x) * processScale + (50 * processScale) - (pad.width * processScale / 2),
                   top: (pad.y - comp.y) * processScale + (50 * processScale) - (pad.height * processScale / 2),
@@ -142,15 +273,61 @@ const PCBComponentNode = React.memo<{ comp: any; isSelected: boolean; processSca
   return true;
 });
 
-const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSelect, mode = 'live' }: { graph: ProjectGraph, selectedIds?: string[], onSelect?: (id: string) => void, mode?: 'live' | 'replay' | 'inspect' }) {
+const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSelect, onCommitTransaction, mode = 'live' }: { graph: ProjectGraph, selectedIds?: string[], onSelect?: (id: string) => void, onCommitTransaction?: (graph: ProjectGraph) => void, mode?: 'live' | 'replay' | 'inspect' }) {
   const isInteractive = mode === 'live';
   const isReadOnly = mode !== 'live';
 
   const [zoom, setZoom] = useState(1);
-  const lastTouchDistRef = useRef<number | null>(null);
-  const initialTouchZoomRef = useRef<number>(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const isPanning = useRef(false);
+  const lastPanPos = useRef({ x: 0, y: 0 });
+
+  const [showThreeD, setShowThreeD] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3000);
+  }, []);
+
+  const triggerDownload = useCallback((filename: string, content: string, mimeType: string = "text/plain") => {
+    try {
+      const blob = new Blob([content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      showToast(`SUCCESS: Downloaded ${filename}`);
+    } catch (e: any) {
+      showToast(`ERROR: Failed download. ${e.message}`);
+    }
+  }, [showToast]);
+
   const [isMobile, setIsMobile] = useState(false);
   const [mobileLayersOpen, setMobileLayersOpen] = useState(false);
+  const [activeTool, setActiveTool] = useState<'select' | 'route'>('select');
+  const [routingState, setRoutingState] = useState<{ 
+    activeNetId: string; 
+    points: {x:number; y:number}[]; 
+    layer: string; 
+    width: number; 
+    vias?: {x: number; y: number; netId: string}[];
+    isDiffPair?: boolean;
+    diffPair?: any;
+    role?: 'positive' | 'negative';
+    otherPoints?: {x:number; y:number}[];
+    otherVias?: {x: number; y: number; netId: string}[];
+    sideSign?: number;
+  } | null>(null);
+  const [pointerPos, setPointerPos] = useState({x: 0, y: 0});
+  const [pointerPosOther, setPointerPosOther] = useState({x: 0, y: 0});
+  const boardRef = useRef<HTMLDivElement>(null);
+
   const [layers, setLayers] = useState([
     { id: 'F.Cu', name: 'Top Layer', color: 'bg-red-500', visible: true },
     { id: 'B.Cu', name: 'Bottom Layer', color: 'bg-blue-500', visible: true },
@@ -174,9 +351,545 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
   const intervalRef = useRef<any>(null);
   const timeoutRef = useRef<any>(null);
 
+  const processScale = 20; // 1mm = 20px
+
   // Synchronize Schematic Graph to PCB Board Deterministically
   const board = useMemo(() => syncBoardFromGraph(graph), [graph]);
-  const processScale = 20; // 1mm = 20px
+
+  const isElementVisible = useCallback((bx: number, by: number, radius = 5) => {
+    if (!boardRef.current) return true;
+    const parent = boardRef.current.parentElement;
+    if (!parent) return true;
+    const rect = parent.getBoundingClientRect();
+    if (!rect) return true;
+    const renderX = (bx + 50) * processScale * zoom + pan.x + (rect.width / 2 - (100 * processScale * zoom) / 2);
+    const renderY = (by + 50) * processScale * zoom + pan.y + (rect.height / 2 - (100 * processScale * zoom) / 2);
+    const margin = radius * processScale * zoom + 100;
+    return (
+      renderX >= -margin &&
+      renderX <= rect.width + margin &&
+      renderY >= -margin &&
+      renderY <= rect.height + margin
+    );
+  }, [pan, zoom]);
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    // Middle click or space+click (assume middle for now)
+    if (e.button === 1 || e.buttons === 4 || e.altKey || (!isInteractive && e.button === 0)) {
+      isPanning.current = true;
+      lastPanPos.current = { x: e.clientX, y: e.clientY };
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
+  };
+
+  const commitRoutingTrace = useCallback((finalPoint?: { x: number; y: number }) => {
+    if (!routingState || !onCommitTransaction) return;
+    
+    const targetPoints = [...routingState.points];
+    const otherTargetPoints = routingState.otherPoints ? [...routingState.otherPoints] : [];
+
+    if (finalPoint) {
+      targetPoints.push(finalPoint);
+      if (routingState.isDiffPair) {
+        // Line offset approximation for sibling end-pad connection
+        const lastP = routingState.points[routingState.points.length - 1];
+        const dx = finalPoint.x - lastP.x;
+        const dy = finalPoint.y - lastP.y;
+        const dist = Math.hypot(dx, dy);
+        let siblingFinal = finalPoint;
+        if (dist > 0.01) {
+          const ux = dx / dist;
+          const uy = dy / dist;
+          const sideSign = routingState.sideSign || 1;
+          siblingFinal = {
+            x: finalPoint.x - uy * sideSign * routingState.diffPair.spacing,
+            y: finalPoint.y + ux * sideSign * routingState.diffPair.spacing
+          };
+        }
+        otherTargetPoints.push(siblingFinal);
+      }
+    } else {
+      targetPoints.push(pointerPos);
+      if (routingState.isDiffPair) {
+        otherTargetPoints.push(pointerPosOther);
+      }
+    }
+    
+    if (targetPoints.length < 2) {
+      setRoutingState(null);
+      return;
+    }
+    
+    const newTraceId = `trace_${Date.now()}`;
+    const newSegments: any[] = [];
+    
+    // Plotted main track segments
+    for (let i = 0; i < targetPoints.length - 1; i++) {
+        newSegments.push({
+            id: `${newTraceId}_${i}`,
+            netId: routingState.activeNetId,
+            layer: routingState.layer as any,
+            width: routingState.width,
+            startX: targetPoints[i].x,
+            startY: targetPoints[i].y,
+            endX: targetPoints[i+1].x,
+            endY: targetPoints[i+1].y
+        });
+    }
+
+    // Companion offset segments
+    if (routingState.isDiffPair && otherTargetPoints.length >= 2) {
+      const otherNetId = routingState.activeNetId === routingState.diffPair.positiveNetId 
+        ? routingState.diffPair.negativeNetId 
+        : routingState.diffPair.positiveNetId;
+      const otherTraceId = `trace_neg_${Date.now()}`;
+      
+      for (let i = 0; i < otherTargetPoints.length - 1; i++) {
+        newSegments.push({
+          id: `${otherTraceId}_${i}`,
+          netId: otherNetId,
+          layer: routingState.layer as any,
+          width: routingState.diffPair.width || routingState.width,
+          startX: otherTargetPoints[i].x,
+          startY: otherTargetPoints[i].y,
+          endX: otherTargetPoints[i+1].x,
+          endY: otherTargetPoints[i+1].y
+        });
+      }
+    }
+
+    // Process primary vias
+    const newVias = [...(graph.vias || [])];
+    if (routingState.vias && routingState.vias.length > 0) {
+      routingState.vias.forEach((via: any, idx: number) => {
+         newVias.push({
+            id: `via_${Date.now()}_${idx}`,
+            netId: routingState.activeNetId,
+            x: via.x,
+            y: via.y,
+            drillSize: 0.3,
+            padSize: 0.6
+         });
+      });
+    }
+
+    // Process symmetric partner vias
+    if (routingState.isDiffPair && routingState.otherVias && routingState.otherVias.length > 0) {
+      routingState.otherVias.forEach((via: any, idx: number) => {
+         newVias.push({
+            id: `via_neg_${Date.now()}_${idx}`,
+            netId: via.netId,
+            x: via.x,
+            y: via.y,
+            drillSize: 0.3,
+            padSize: 0.6
+         });
+      });
+    }
+
+    const newGraph = {
+        ...graph,
+        traces: [...(graph.traces || []), ...newSegments],
+        vias: newVias
+    };
+    onCommitTransaction(newGraph);
+    showToast("SUCCESS: Committed stable geometry route.");
+    setRoutingState(null);
+  }, [routingState, pointerPos, pointerPosOther, graph, onCommitTransaction, showToast]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (isPanning.current) {
+      const dx = e.clientX - lastPanPos.current.x;
+      const dy = e.clientY - lastPanPos.current.y;
+      setPan(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+      lastPanPos.current = { x: e.clientX, y: e.clientY };
+    }
+
+    if (activeTool === 'route' && boardRef.current) {
+      const rect = boardRef.current.getBoundingClientRect();
+      const styleScale = rect.width / (100 * processScale);
+      const rawX = (e.clientX - rect.left) / styleScale;
+      const rawY = (e.clientY - rect.top) / styleScale;
+
+      const bx = (rawX / processScale) - 50;
+      const by = (rawY / processScale) - 50;
+
+      let snapPad: any = null;
+      let targetX = bx;
+      let targetY = by;
+      
+      if (routingState) {
+        let minDistance = 2.0;
+        board.components.forEach(comp => {
+          comp.pads.forEach(pad => {
+            if (pad.netId === routingState.activeNetId) {
+              const dist = Math.hypot(bx - pad.x, by - pad.y);
+              if (dist < minDistance) {
+                minDistance = dist;
+                snapPad = pad;
+              }
+            }
+          });
+        });
+      }
+      
+      if (snapPad) {
+        targetX = snapPad.x;
+        targetY = snapPad.y;
+      }
+
+      let cx = targetX;
+      let cy = targetY;
+
+      if (routingState && routingState.points.length > 0) {
+        const lastP = routingState.points[routingState.points.length - 1];
+        const dx = targetX - lastP.x;
+        const dy = targetY - lastP.y;
+        
+        if (e.shiftKey) {
+            // Free form
+        } else {
+            const absDx = Math.abs(dx);
+            const absDy = Math.abs(dy);
+            if (absDx < absDy * 0.4) cx = lastP.x;
+            else if (absDy < absDx * 0.4) cy = lastP.y;
+            else {
+              const maxSide = Math.max(absDx, absDy);
+              cx = lastP.x + Math.sign(dx) * maxSide;
+              cy = lastP.y + Math.sign(dy) * maxSide;
+            }
+        }
+      }
+
+      let cx_other = cx;
+      let cy_other = cy;
+
+      if (routingState && routingState.points.length > 0) {
+        const lastP = routingState.points[routingState.points.length - 1];
+        const dx = cx - lastP.x;
+        const dy = cy - lastP.y;
+        
+        if (routingState.isDiffPair && routingState.otherPoints) {
+          const lastP_other = routingState.otherPoints[routingState.otherPoints.length - 1];
+          const dist = Math.hypot(dx, dy);
+          
+          if (dist > 0.01) {
+            const ux = dx / dist;
+            const uy = dy / dist;
+            const px = -uy;
+            const py = ux;
+            
+            let sideSign = 1;
+            if (routingState.points.length === 1 && !routingState.sideSign) {
+              const otherStart = routingState.otherPoints[0];
+              const dot_perp = (otherStart.x - lastP.x) * px + (otherStart.y - lastP.y) * py;
+              sideSign = dot_perp >= 0 ? 1 : -1;
+              routingState.sideSign = sideSign;
+            } else {
+              sideSign = routingState.sideSign || 1;
+            }
+            
+            cx_other = cx + px * sideSign * routingState.diffPair.spacing;
+            cy_other = cy + py * sideSign * routingState.diffPair.spacing;
+          } else {
+            cx_other = lastP_other.x;
+            cy_other = lastP_other.y;
+          }
+        }
+      }
+
+      setPointerPos({ x: cx, y: cy });
+      setPointerPosOther({ x: cx_other, y: cy_other });
+    }
+  }, [activeTool, routingState, board, processScale]);
+
+  const handleBoardClick = useCallback((e: React.MouseEvent) => {
+    if (isReadOnly) return;
+    if (activeTool === 'route' && routingState) {
+        setRoutingState(prev => {
+          if (!prev) return null;
+          const nextPoints = [...prev.points, pointerPos];
+          let nextOtherPoints = prev.otherPoints ? [...prev.otherPoints] : undefined;
+          if (prev.isDiffPair && prev.otherPoints) {
+            nextOtherPoints = [...prev.otherPoints, pointerPosOther];
+          }
+          return {
+            ...prev,
+            points: nextPoints,
+            otherPoints: nextOtherPoints
+          };
+        });
+    }
+  }, [isReadOnly, activeTool, routingState, pointerPos, pointerPosOther]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setRoutingState(null);
+        setActiveTool('select');
+      }
+
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        if (routingState) {
+          if (routingState.points.length > 1) {
+             setRoutingState(prev => {
+                if (!prev) return null;
+                const nextPoints = [...prev.points];
+                nextPoints.pop();
+                let nextOtherPoints = prev.otherPoints ? [...prev.otherPoints] : undefined;
+                if (nextOtherPoints && nextOtherPoints.length > 1) {
+                  nextOtherPoints.pop();
+                }
+                return { 
+                  ...prev, 
+                  points: nextPoints,
+                  otherPoints: nextOtherPoints
+                };
+             });
+             showToast("INFO: Removed last routing segment.");
+          } else {
+             setRoutingState(null);
+             showToast("INFO: Cancelled routing.");
+          }
+        }
+      }
+      
+      if (e.key === 'Enter') {
+        if (routingState) {
+          commitRoutingTrace();
+        }
+      }
+
+      if (e.key === 'v' || e.key === 'V') {
+        if (activeTool === 'route' && routingState) {
+          const currentLayer = routingState.layer;
+          const nextLayer = currentLayer === 'F.Cu' ? 'B.Cu' : 'F.Cu';
+          
+          setRoutingState(prev => {
+            if (!prev) return null;
+            const currentPoints = [...prev.points, pointerPos];
+            const currentVias = prev.vias ? [...prev.vias] : [];
+            currentVias.push({ x: pointerPos.x, y: pointerPos.y, netId: prev.activeNetId });
+            
+            let nextOtherPoints = prev.otherPoints ? [...prev.otherPoints] : undefined;
+            let nextOtherVias = prev.otherVias ? [...prev.otherVias] : undefined;
+            
+            if (prev.isDiffPair && prev.otherPoints) {
+              nextOtherPoints = [...prev.otherPoints, pointerPosOther];
+              nextOtherVias = prev.otherVias ? [...prev.otherVias] : [];
+              const otherNetId = prev.activeNetId === prev.diffPair.positiveNetId 
+                ? prev.diffPair.negativeNetId 
+                : prev.diffPair.positiveNetId;
+              nextOtherVias.push({ x: pointerPosOther.x, y: pointerPosOther.y, netId: otherNetId });
+            }
+
+            return {
+              ...prev,
+              layer: nextLayer,
+              points: currentPoints,
+              vias: currentVias,
+              otherPoints: nextOtherPoints,
+              otherVias: nextOtherVias
+            };
+          });
+          
+          showToast(`SUCCESS: Placed Symmetric Vias & Switched to ${nextLayer === 'F.Cu' ? 'Top Layer' : 'Bottom Layer'}`);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeTool, routingState, pointerPos, pointerPosOther, commitRoutingTrace, showToast]);
+
+  const handlePadClick = useCallback((compId: string, padId: string, e: React.PointerEvent) => {
+     if (isReadOnly) return;
+     if (activeTool === 'route') {
+       const pad = board.components.find(c => c.id === compId)?.pads.find(p => p.id === padId);
+       if (pad) {
+         if (!routingState) {
+            if (pad.netId) {
+                const dp = findDiffPair(board, pad.netId);
+                if (dp) {
+                  const clickedComp = board.components.find((c: any) => c.id === compId);
+                  const otherNetId = pad.netId === dp.positiveNetId ? dp.negativeNetId : dp.positiveNetId;
+                  const otherPad = clickedComp?.pads.find((p: any) => p.netId === otherNetId);
+                  
+                  if (otherPad) {
+                    setRoutingState({
+                      activeNetId: pad.netId,
+                      layer: pad.layer.includes('F.Cu') ? 'F.Cu' : 'B.Cu',
+                      width: dp.width || 0.15,
+                      points: [{ x: pad.x, y: pad.y }],
+                      isDiffPair: true,
+                      diffPair: dp,
+                      role: pad.netId === dp.positiveNetId ? 'positive' : 'negative',
+                      otherPoints: [{ x: otherPad.x, y: otherPad.y }],
+                      otherVias: []
+                    });
+                    showToast(`INFO: Initiated Paired Routing on Differential Group [${dp.name}]`);
+                    return;
+                  }
+                }
+
+                setRoutingState({
+                  activeNetId: pad.netId,
+                  layer: pad.layer.includes('F.Cu') ? 'F.Cu' : 'B.Cu',
+                  width: 0.25,
+                  points: [{ x: pad.x, y: pad.y }]
+                });
+            } else {
+                showToast("WARN: Cannot route unconnected pad.");
+            }
+         } else {
+            if (pad.netId === routingState.activeNetId) {
+                commitRoutingTrace({ x: pad.x, y: pad.y });
+            } else {
+                showToast("WARN: Short circuit detected! Cannot connect pad to wrong net.");
+            }
+         }
+       }
+     }
+  }, [isReadOnly, activeTool, routingState, board, commitRoutingTrace, showToast]);
+
+  const triggerSerpentineTuning = useCallback(() => {
+    if (isReadOnly) return;
+    
+    const diffPairsList: any[] = [];
+    
+    if (board.diffPairs && board.diffPairs.length > 0) {
+      board.diffPairs.forEach((dp: any) => diffPairsList.push({ ...dp }));
+    }
+    
+    board.nets.forEach((net1: any) => {
+      let isPositive = false;
+      let baseName = "";
+      if (net1.name.endsWith("+")) {
+        isPositive = true;
+        baseName = net1.name.slice(0, -1);
+      } else if (net1.name.endsWith("_P")) {
+        isPositive = true;
+        baseName = net1.name.slice(0, -2);
+      } else if (net1.name.endsWith("DP") && net1.name !== "GND" && net1.name !== "VCC") {
+        isPositive = true;
+        baseName = net1.name.slice(0, -2);
+      }
+      if (isPositive) {
+        const matchingNegs = [baseName + "-", baseName + "_N", baseName + "DN"];
+        const net2 = board.nets.find((n: any) => matchingNegs.includes(n.name));
+        if (net2) {
+          const registered = diffPairsList.some((dp: any) => 
+            (dp.positiveNetId === net1.id && dp.negativeNetId === net2.id) || 
+            (dp.positiveNetId === net2.id && dp.negativeNetId === net1.id)
+          );
+          if (!registered) {
+            diffPairsList.push({
+              id: `auto-dp-${baseName}`,
+              name: baseName,
+              positiveNetId: net1.id,
+              negativeNetId: net2.id,
+              spacing: 0.25,
+              width: 0.15,
+              skewTolerance: 0.5,
+              targetImpedance: 90,
+              maxUncoupledLength: 5.0
+            });
+          }
+        }
+      }
+    });
+
+    if (diffPairsList.length === 0) {
+      showToast("WARN: No differential pairs (e.g. companion nets USB_D+, USB_D-) found to equalize skew!");
+      return;
+    }
+
+    let tunedCount = 0;
+
+    diffPairsList.forEach((dp: any) => {
+      const posTraces = board.traces.filter((t: any) => t.netId === dp.positiveNetId);
+      const negTraces = board.traces.filter((t: any) => t.netId === dp.negativeNetId);
+
+      const posLen = posTraces.reduce((sum: number, t: any) => sum + Math.hypot(t.startX - t.endX, t.startY - t.endY), 0);
+      const negLen = negTraces.reduce((sum: number, t: any) => sum + Math.hypot(t.startX - t.endX, t.startY - t.endY), 0);
+      
+      const skew = Math.abs(posLen - negLen);
+      if (skew < 0.1) {
+        showToast(`INFO: Pair [${dp.name}] is already matched (skew < 0.1mm)`);
+        return;
+      }
+
+      const shorterNetId = posLen < negLen ? dp.positiveNetId : dp.negativeNetId;
+      const shorterTraces = posLen < negLen ? posTraces : negTraces;
+
+      let longestSegment: any = null;
+      let maxSegLen = 0;
+      shorterTraces.forEach((t: any) => {
+        const length = Math.hypot(t.startX - t.endX, t.startY - t.endY);
+        if (length > maxSegLen) {
+          maxSegLen = length;
+          longestSegment = t;
+        }
+      });
+
+      if (longestSegment && maxSegLen > 2.0) {
+        const serpPoints = generateSerpentineTrace(
+          { x: longestSegment.startX, y: longestSegment.startY },
+          { x: longestSegment.endX, y: longestSegment.endY },
+          skew,
+          dp.spacing
+        );
+
+        const newSegments: any[] = [];
+        const serpId = `serp_${Date.now()}`;
+        
+        for (let i = 0; i < serpPoints.length - 1; i++) {
+          newSegments.push({
+            id: `${serpId}_${i}`,
+            netId: shorterNetId,
+            layer: longestSegment.layer,
+            width: longestSegment.width,
+            startX: serpPoints[i].x,
+            startY: serpPoints[i].y,
+            endX: serpPoints[i+1].x,
+            endY: serpPoints[i+1].y
+          });
+        }
+
+        const remainingTraces = graph.traces ? graph.traces.filter((t: any) => t.id !== longestSegment.id) : [];
+        const updatedGraph = {
+          ...graph,
+          traces: [...remainingTraces, ...newSegments]
+        };
+
+        onCommitTransaction?.(updatedGraph);
+        tunedCount++;
+        showToast(`SUCCESS: Tuned Pair [${dp.name}] skew by appending serpentine delay bends (+${skew.toFixed(2)}mm) to shorter trace segment.`);
+      } else {
+        showToast("WARN: Straight segment of at least 2mm is required on shorter trace to place serpentine loops.");
+      }
+    });
+  }, [board, graph, isReadOnly, onCommitTransaction, showToast]);
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    if (isPanning.current) {
+      isPanning.current = false;
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const zoomSensitivity = 0.005;
+      setZoom(z => Math.max(0.1, z - e.deltaY * zoomSensitivity));
+    } else {
+      e.preventDefault();
+      setPan(prev => ({ x: prev.x - e.deltaX, y: prev.y - e.deltaY }));
+    }
+  };
+
+  const lastTouchDistRef = useRef<number | null>(null);
+  const initialTouchZoomRef = useRef<number>(1);
 
   const drcViolations = useMemo(() => runDRC(board), [board]);
 
@@ -204,6 +917,13 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
       });
     }, 50);
   };
+
+  useEffect(() => {
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     let rAFId: number | null = null;
@@ -240,8 +960,11 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
             <button 
               key={i} 
               disabled={isReadOnly}
+              onClick={() => {
+                if (!tool.active && isInteractive) showToast("INFO: Advanced routing coming in v4.1.");
+              }}
               className={cn(
-                "p-2 rounded-lg transition-all",
+                "p-2 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg transition-all cursor-pointer",
                 tool.active ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/20" : "text-gray-600 hover:text-white",
                 isReadOnly && "opacity-40 cursor-not-allowed"
               )}
@@ -289,12 +1012,14 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
 
         {/* The PCB Board Simulation */}
         <motion.div 
-          className="relative bg-[#111] border-[4px] border-[#1a1a1a] shadow-[0_0_100px_rgba(0,0,0,0.5),inset_0_0_40px_rgba(0,0,0,0.8)]"
+          ref={boardRef}
+          onClick={handleBoardClick}
+          className={cn("relative bg-[#111] border-[4px] border-[#1a1a1a] shadow-[0_0_100px_rgba(0,0,0,0.5),inset_0_0_40px_rgba(0,0,0,0.8)]", activeTool === 'route' ? "cursor-crosshair" : "")}
           style={{ width: 100 * processScale, height: 100 * processScale }} // Assuming 100x100mm board max for preview
           initial={{ scale: 0.8, opacity: 0 }}
           animate={{ scale: zoom, opacity: 1 }}
           transition={{ type: 'tween', duration: 0 }}
-          drag
+          drag={activeTool !== 'route'}
           dragConstraints={{ left: -500, right: 500, top: -500, bottom: 500 }}
           dragElastic={0.05}
           onDragStart={() => setIsDragging(true)}
@@ -328,10 +1053,161 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
             <BoardOutlineOverlay outlinePoints={board.outline.points} processScale={processScale} />
           )}
 
+          {/* Render Committed Traces */}
+          <svg className="absolute inset-0 w-full h-full pointer-events-none z-10 overflow-visible">
+            {board.traces.map(t => {
+               const visible = t.layer === 'F.Cu' ? isFCuVisible : isBCuVisible;
+               if (!visible) return null;
+               // Viewport culling
+               if (!isElementVisible(t.startX, t.startY, 2) && !isElementVisible(t.endX, t.endY, 2)) {
+                   return null;
+               }
+               
+               // Detect high speed differential trace
+               const isDpTrace = board.diffPairs?.some((dp: any) => dp.positiveNetId === t.netId || dp.negativeNetId === t.netId)
+                                 || t.netId.includes("USB_D") || t.netId.includes("_P") || t.netId.includes("_N");
+               return (
+                 <g key={t.id}>
+                   {isDpTrace && (
+                     <line 
+                       x1={t.startX * processScale + 50 * processScale}
+                       y1={t.startY * processScale + 50 * processScale}
+                       x2={t.endX * processScale + 50 * processScale}
+                       y2={t.endY * processScale + 50 * processScale}
+                       stroke="#10b981"
+                       strokeWidth={t.width * processScale + 6}
+                       opacity="0.12"
+                       strokeLinecap="round"
+                     />
+                   )}
+                   <line 
+                     key={t.id}
+                     x1={t.startX * processScale + 50 * processScale}
+                     y1={t.startY * processScale + 50 * processScale}
+                     x2={t.endX * processScale + 50 * processScale}
+                     y2={t.endY * processScale + 50 * processScale}
+                     stroke={t.layer === 'F.Cu' ? '#ef4444' : '#3b82f6'}
+                     strokeWidth={t.width * processScale}
+                     strokeLinecap="round"
+                   />
+                 </g>
+               );
+            })}
+          </svg>
+
+          {/* Render Vias */}
+          <svg className="absolute inset-0 w-full h-full pointer-events-none z-30 overflow-visible">
+            {(board.vias || []).map((v: any) => {
+               if (!isElementVisible(v.x, v.y, 1)) return null;
+               return (
+                 <g key={v.id}>
+                   <circle 
+                     cx={v.x * processScale + 50 * processScale}
+                     cy={v.y * processScale + 50 * processScale}
+                     r={(v.padSize || 0.6) * processScale / 2}
+                     fill="#fbbf24"
+                     stroke="#d97706"
+                     strokeWidth="1"
+                   />
+                   <circle 
+                     cx={v.x * processScale + 50 * processScale}
+                     cy={v.y * processScale + 50 * processScale}
+                     r={(v.drillSize || 0.3) * processScale / 2}
+                     fill="#111"
+                   />
+                 </g>
+               );
+            })}
+          </svg>
+
+          {/* Render Active Routing Ghost */}
+          {activeTool === 'route' && routingState && (
+            <>
+              <svg className="absolute inset-0 w-full h-full pointer-events-none z-40 overflow-visible">
+                 <polyline 
+                   points={[...routingState.points, pointerPos].map(p => `${p.x * processScale + 50 * processScale},${p.y * processScale + 50 * processScale}`).join(' ')}
+                   fill="none"
+                   stroke={routingState.layer === 'F.Cu' ? '#ef4444' : '#3b82f6'}
+                   strokeWidth={routingState.width * processScale}
+                   strokeLinecap="round"
+                   strokeLinejoin="round"
+                   opacity="0.6"
+                 />
+              </svg>
+              {routingState.isDiffPair && routingState.otherPoints && (
+                <>
+                  <svg className="absolute inset-0 w-full h-full pointer-events-none z-41 overflow-visible">
+                     <polyline 
+                       points={[...routingState.otherPoints, pointerPosOther].map(p => `${p.x * processScale + 50 * processScale},${p.y * processScale + 50 * processScale}`).join(' ')}
+                       fill="none"
+                       stroke={routingState.layer === 'F.Cu' ? '#10b981' : '#a855f7'}
+                       strokeWidth={(routingState.diffPair?.width || routingState.width) * processScale}
+                       strokeLinecap="round"
+                       strokeLinejoin="round"
+                       opacity="0.65"
+                       strokeDasharray="4 2"
+                     />
+                  </svg>
+                  {routingState.otherVias && routingState.otherVias.map((v: any, idx: number) => (
+                    <svg key={`via_oth_${idx}`} className="absolute inset-0 w-full h-full pointer-events-none z-42 overflow-visible">
+                       <circle 
+                         cx={v.x * processScale + 50 * processScale}
+                         cy={v.y * processScale + 50 * processScale}
+                         r={0.6 * processScale / 2}
+                         fill="#fbbf24"
+                         stroke="#10b981"
+                         strokeWidth="1.5"
+                         opacity="0.8"
+                       />
+                       <circle 
+                         cx={v.x * processScale + 50 * processScale}
+                         cy={v.y * processScale + 50 * processScale}
+                         r={0.3 * processScale / 2}
+                         fill="#111"
+                         opacity="0.8"
+                       />
+                    </svg>
+                  ))}
+                </>
+              )}
+            </>
+          )}
+
+          {/* Render Active Routing Vias */}
+          {activeTool === 'route' && routingState && routingState.vias && (
+            <svg className="absolute inset-0 w-full h-full pointer-events-none z-45 overflow-visible">
+               {routingState.vias.map((v: any, idx: number) => {
+                 if (!isElementVisible(v.x, v.y, 1)) return null;
+                 return (
+                   <g key={idx}>
+                     <circle 
+                       cx={v.x * processScale + 50 * processScale}
+                       cy={v.y * processScale + 50 * processScale}
+                       r={0.6 * processScale / 2}
+                       fill="#fbbf24"
+                       opacity="0.6"
+                     />
+                     <circle 
+                       cx={v.x * processScale + 50 * processScale}
+                       cy={v.y * processScale + 50 * processScale}
+                       r={0.3 * processScale / 2}
+                       fill="#111"
+                       opacity="0.6"
+                     />
+                   </g>
+                 );
+               })}
+            </svg>
+          )}
+
           {/* Render Pad & Components with pointer-events transparency optimization during dragging */}
           <div className={cn("absolute inset-0", isDragging && "pointer-events-none")}>
             {board.components.map((comp: any) => {
               const isSelected = selectedIds.includes(comp.id);
+              // Viewport culling check for components
+              if (!isElementVisible(comp.x, comp.y, 8)) {
+                  return null;
+              }
               return (
                 <PCBComponentNode 
                   key={comp.id} 
@@ -343,14 +1219,42 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
                   isBCuVisible={isBCuVisible}
                   isReadOnly={isReadOnly}
                   onSelect={onSelect} 
+                  onPadClick={handlePadClick}
+                  zoom={zoom}
                 />
               );
             })}
           </div>
 
           {/* Ratsnest Lines */}
-          <RatsnestLayer board={board} processScale={processScale} />
+          <RatsnestLayer board={board} processScale={processScale} isElementVisible={isElementVisible} />
         </motion.div>
+
+        {/* PCB Toolbar */}
+        {!isReadOnly && !isMobile && (
+          <div className="absolute top-1/2 -translate-y-1/2 left-6 z-40 flex flex-col gap-2 bg-[#0d0d0d]/90 backdrop-blur border border-white/10 rounded-2xl p-2 shadow-2xl">
+            <button 
+              onClick={() => { setActiveTool('select'); setRoutingState(null); }}
+              className={cn(
+                "p-3 rounded-xl transition-all cursor-pointer relative group",
+                activeTool === 'select' ? "bg-indigo-600 text-white" : "text-gray-500 hover:text-white"
+              )}
+            >
+              <MousePointer2 size={18} />
+              <div className="absolute left-full ml-3 top-1/2 -translate-y-1/2 bg-[#222] text-white text-[10px] font-bold px-2 py-1 rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap shadow-xl">Select Mode</div>
+            </button>
+            <button 
+              onClick={() => { setActiveTool('route'); setRoutingState(null); }}
+              className={cn(
+                "p-3 rounded-xl transition-all cursor-pointer relative group",
+                activeTool === 'route' ? "bg-indigo-600 text-white" : "text-gray-500 hover:text-white"
+              )}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 5l4 4"/><path d="M21 5l-4 4"/><path d="M5 19l4-4"/><path d="M21 19l-4-4"/><circle cx="12" cy="12" r="3"/></svg>
+              <div className="absolute left-full ml-3 top-1/2 -translate-y-1/2 bg-[#222] text-white text-[10px] font-bold px-2 py-1 rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap shadow-xl">Interactive Routing</div>
+            </button>
+          </div>
+        )}
 
         {/* Floating View Controls */}
         <div className="absolute bottom-6 md:bottom-10 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-[#0d0d0d]/90 backdrop-blur border border-white/10 p-1 rounded-full shadow-2xl z-40">
@@ -387,7 +1291,7 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
                     <div 
                       key={layer.id} 
                       onClick={() => toggleLayer(layer.id)}
-                      className="flex items-center justify-between cursor-pointer py-1 select-none active:opacity-75"
+                      className="flex items-center justify-between cursor-pointer py-2 min-h-[44px] select-none active:opacity-75"
                     >
                       <div className="flex items-center gap-2">
                         <div className={cn("w-2.5 h-2.5 rounded-full", layer.color, !layer.visible && "opacity-20")} />
@@ -440,6 +1344,133 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
             </button>
           </div>
         )}
+
+        {/* High-Speed Differential Paired Routing HUD */}
+        <AnimatePresence>
+          {((routingState && routingState.isDiffPair) || (board.diffPairs && board.diffPairs.length > 0)) && (
+            <motion.div
+              initial={{ opacity: 0, y: 30, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 30, scale: 0.95 }}
+              className="absolute bottom-6 right-6 md:right-16 z-45 w-80 bg-[#0d0d0d]/95 backdrop-blur-xl border border-white/10 p-4 rounded-2xl shadow-2xl flex flex-col gap-3 font-mono text-[10px] select-none"
+            >
+              <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                <div className="flex items-center gap-1.5">
+                  <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="text-[9px] font-black uppercase tracking-[0.15em] text-white">HIGH-SPEED ROUTING HUD</span>
+                </div>
+                <span className="text-[8px] text-zinc-500 font-extrabold uppercase tracking-tight">ACTIVE PAIR</span>
+              </div>
+
+              {(() => {
+                let dpName = "DEFAULT_PAIR";
+                let pLen = 0;
+                let nLen = 0;
+                let targetImp = 90;
+                let skewTol = 0.5;
+
+                if (routingState && routingState.isDiffPair) {
+                  dpName = routingState.diffPair.name;
+                  const pTraces = board.traces.filter((t: any) => t.netId === routingState.diffPair.positiveNetId);
+                  const nTraces = board.traces.filter((t: any) => t.netId === routingState.diffPair.negativeNetId);
+                  const pBase = pTraces.reduce((sum: number, t: any) => sum + Math.hypot(t.startX - t.endX, t.startY - t.endY), 0);
+                  const nBase = nTraces.reduce((sum: number, t: any) => sum + Math.hypot(t.startX - t.endX, t.startY - t.endY), 0);
+
+                  // Ghost drawing trace length calculation
+                  const ghostPLen = routingState.points.reduce((sum: number, pt: any, idx: number, arr: any[]) => {
+                    if (idx === 0) return 0;
+                    return sum + Math.hypot(pt.x - arr[idx-1].x, pt.y - arr[idx-1].y);
+                  }, 0) + Math.hypot(pointerPos.x - (routingState.points[routingState.points.length-1]?.x || pointerPos.x), pointerPos.y - (routingState.points[routingState.points.length-1]?.y || pointerPos.y));
+
+                  const ghostNLen = routingState.otherPoints?.reduce((sum: number, pt: any, idx: number, arr: any[]) => {
+                    if (idx === 0) return 0;
+                    return sum + Math.hypot(pt.x - arr[idx-1].x, pt.y - arr[idx-1].y);
+                  }, 0) + Math.hypot(pointerPosOther.x - (routingState.otherPoints?.[routingState.otherPoints.length-1]?.x || pointerPosOther.x), pointerPosOther.y - (routingState.otherPoints?.[routingState.otherPoints.length-1]?.y || pointerPosOther.y)) || 0;
+
+                  pLen = pBase + ghostPLen;
+                  nLen = nBase + ghostNLen;
+                  targetImp = routingState.diffPair.targetImpedance || 90;
+                  skewTol = routingState.diffPair.skewTolerance || 0.5;
+                } else {
+                  const firstPair = board.diffPairs?.[0] || {
+                    name: "USB_D",
+                    positiveNetId: board.nets.find((n: any) => n.name.includes("+") || n.name.includes("_P"))?.id || "",
+                    negativeNetId: board.nets.find((n: any) => n.name.includes("-") || n.name.includes("_N"))?.id || "",
+                    spacing: 0.25,
+                    width: 0.15,
+                    skewTolerance: 0.5,
+                    targetImpedance: 90
+                  };
+                  dpName = firstPair.name;
+                  pLen = board.traces.filter((t: any) => t.netId === firstPair.positiveNetId).reduce((sum: number, t: any) => sum + Math.hypot(t.startX - t.endX, t.startY - t.endY), 0);
+                  nLen = board.traces.filter((t: any) => t.netId === firstPair.negativeNetId).reduce((sum: number, t: any) => sum + Math.hypot(t.startX - t.endX, t.startY - t.endY), 0);
+                  targetImp = firstPair.targetImpedance || 90;
+                  skewTol = firstPair.skewTolerance || 0.5;
+                }
+
+                const skew = Math.abs(pLen - nLen);
+                const isSymmetric = skew <= skewTol;
+
+                return (
+                  <>
+                    <div className="flex flex-col gap-1.5 text-[10px]">
+                      <div className="flex justify-between items-center text-zinc-400">
+                        <span>CHANNEL ID:</span>
+                        <span className="text-white font-black text-xs">{dpName}</span>
+                      </div>
+                      <div className="flex justify-between items-center text-zinc-400 mt-1">
+                        <span>ARM D+ (POS):</span>
+                        <span className="text-red-400 font-bold font-mono">{pLen.toFixed(2)} mm</span>
+                      </div>
+                      <div className="flex justify-between items-center text-zinc-400">
+                        <span>ARM D- (NEG):</span>
+                        <span className="text-emerald-400 font-bold font-mono">{nLen.toFixed(2)} mm</span>
+                      </div>
+                      <div className="flex justify-between items-center font-bold mt-1.5 border-t border-white/5 pt-1.5">
+                        <span className="text-zinc-400">LENGTH SKEW:</span>
+                        <span className={cn(isSymmetric ? "text-emerald-400" : "text-rose-400", "font-black text-[11px]")}>
+                          {skew.toFixed(2)} mm {isSymmetric ? "✔ (PASS)" : "✘ (TUNE)"}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center text-zinc-400 text-[9px]">
+                        <span>TOLERANCE LIMIT:</span>
+                        <span className="text-zinc-300">± {skewTol} mm</span>
+                      </div>
+                      <div className="flex justify-between items-center text-zinc-400 text-[9px]">
+                        <span>COUPLED IMPEDANCE:</span>
+                        <span className="text-indigo-400 font-bold">{targetImp} Ω (FR4 Microstrip)</span>
+                      </div>
+                    </div>
+
+                    {!isReadOnly && (
+                      <button
+                        onClick={triggerSerpentineTuning}
+                        className="w-full mt-1 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 rounded-xl text-[9px] uppercase font-bold tracking-widest transition-colors cursor-pointer flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-activity"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                        APPLY SERPENTINE DELAY TUNE
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Local Toast Overlay */}
+        <AnimatePresence>
+          {toastMessage && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 20 }}
+              className="absolute bottom-20 left-1/2 -translate-x-1/2 z-50 bg-[#0d0d0d] border border-white/10 text-white text-xs px-4 py-2 rounded-lg shadow-2xl tracking-widest uppercase font-bold"
+            >
+              {toastMessage}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </main>
 
       {/* Right Sidebar - Layers & Inspector */}
@@ -491,15 +1522,126 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
                   <button 
                     onClick={startAutoFix}
                     disabled={isFixing || isReadOnly}
-                    className="w-full py-2.5 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-600/30 text-emerald-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                    className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-600/30 text-emerald-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
                   >
-                      <ShieldCheck size={14} />
-                      {isReadOnly ? (`${mode === 'replay' ? 'Replay' : 'Inspect'} Mode (Read-Only)`) : "AI Check DRC"}
+                      <ShieldCheck size={14} className={isFixing ? "animate-spin" : ""} />
+                      {isReadOnly ? `${mode === 'replay' ? 'Replay' : 'Inspect'} Mode (Read)` : isFixing ? `Scanning...` : "Run AI DRC Check"}
+                  </button>
+
+                  <button 
+                    onClick={() => setShowThreeD(true)}
+                    className="w-full py-2 bg-indigo-600/10 hover:bg-indigo-600/25 border border-indigo-500/20 text-indigo-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                      <Maximize2 size={14} />
+                      Interactive 3D View
+                  </button>
+
+                  <button 
+                    onClick={() => setShowExportModal(true)}
+                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-indigo-500/10"
+                  >
+                      <Settings size={14} />
+                      Export Gerber/PnP
                   </button>
                 </div>
               </div>
           </div>
         </aside>
+      )}
+      {showThreeD && (
+        <ThreeDBoardViewer board={board} onClose={() => setShowThreeD(false)} />
+      )}
+
+      {showExportModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-[#0c0c12] border border-white/10 rounded-2xl w-full max-w-2xl overflow-hidden shadow-2xl flex flex-col p-6 text-gray-200">
+             <div className="flex items-center justify-between border-b border-white/10 pb-4">
+                <div>
+                   <h3 className="text-sm font-black uppercase tracking-wider text-white">7-Target Production Export Deck</h3>
+                   <p className="text-[10px] text-gray-500 font-mono">Download standard compliant manufacturing data packages</p>
+                </div>
+                <button 
+                  onClick={() => setShowExportModal(false)}
+                  className="text-xs bg-white/5 hover:bg-white/10 text-gray-300 font-bold px-3 py-1.5 rounded-lg cursor-pointer transition-all"
+                >
+                  Close
+                </button>
+             </div>
+
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 py-6">
+                {/* Gerber Layer Files Group */}
+                <div className="border border-white/5 bg-[#07070d]/50 rounded-xl p-4 space-y-3">
+                   <h4 className="text-[10px] font-black uppercase tracking-widest text-[#a855f7]">1. Gerber Photoplot Files (RS-274X)</h4>
+                   <p className="text-[9px] text-gray-500 leading-relaxed font-mono">Standard 2:4 decimal inch Gerber files for automated optical plotters.</p>
+                   <div className="flex flex-col gap-1.5 pt-1">
+                      <button 
+                        onClick={() => triggerDownload("F.Cu.gbr", generateGerberRS274X(board, "F.Cu"))}
+                        className="w-full py-1.5 hover:bg-white/5 text-[9px] font-mono hover:text-white border border-white/5 bg-transparent rounded text-left px-3 text-gray-400 capitalize transition-all"
+                      >
+                        ⚡ Plot Top Copper (F.Cu)
+                      </button>
+                      <button 
+                        onClick={() => triggerDownload("B.Cu.gbr", generateGerberRS274X(board, "B.Cu"))}
+                        className="w-full py-1.5 hover:bg-white/5 text-[9px] font-mono hover:text-white border border-white/5 bg-transparent rounded text-left px-3 text-gray-400 capitalize transition-all"
+                      >
+                        ⚡ Plot Bottom Copper (B.Cu)
+                      </button>
+                      <button 
+                        onClick={() => triggerDownload("F.Silkscreen.gbr", generateGerberRS274X(board, "F.Silkscreen"))}
+                        className="w-full py-1.5 hover:bg-white/5 text-[9px] font-mono hover:text-white border border-white/5 bg-transparent rounded text-left px-3 text-gray-400 capitalize transition-all"
+                      >
+                        ⚡ Plot Top Silkscreen (F.Silk)
+                      </button>
+                      <button 
+                        onClick={() => triggerDownload("Edge.Cuts.gbr", generateGerberRS274X(board, "Edge.Cuts"))}
+                        className="w-full py-1.5 hover:bg-white/5 text-[9px] font-mono hover:text-white border border-white/5 bg-transparent rounded text-left px-3 text-gray-400 capitalize transition-all"
+                      >
+                        ⚡ Plot Board Outline (Edge.Cuts)
+                      </button>
+                   </div>
+                </div>
+
+                {/* Drilling & Netlists Group */}
+                <div className="border border-white/5 bg-[#07070d]/50 rounded-xl p-4 flex flex-col justify-between">
+                   <div className="space-y-3">
+                      <h4 className="text-[10px] font-black uppercase tracking-widest text-[#10b981]">2. Drills, Netlists & assembly</h4>
+                      <p className="text-[9px] text-gray-500 leading-relaxed font-mono">Standard numerical drilling coordinates and electrical tracing descriptors.</p>
+                      <div className="flex flex-col gap-1.5 pt-1">
+                         <button 
+                           onClick={() => triggerDownload("board.drl", generateExcellonDrill(board))}
+                           className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-500/20 text-emerald-400 rounded text-[9px] font-mono text-left px-3 transition-all"
+                         >
+                           ⚙️ Excellon NC Drill File (.drl)
+                         </button>
+                         <button 
+                           onClick={() => triggerDownload("netlist.ipc", generateIPCD356Netlist(board))}
+                           className="w-full py-2 bg-indigo-600/10 hover:bg-indigo-600/20 border border-indigo-500/20 text-indigo-400 rounded text-[9px] font-mono text-left px-3 transition-all"
+                         >
+                           ⚙️ IPC-D-356 Netlist descriptor (.ipc)
+                         </button>
+                         <button 
+                           onClick={() => triggerDownload("pick_and_place.csv", generatePickAndPlaceCSV(board))}
+                           className="w-full py-2 bg-[#1e1b4b]/50 hover:bg-[#1e1b4b] border border-indigo-500/10 text-gray-300 rounded text-[9px] font-mono text-left px-3 transition-all"
+                         >
+                           ⚙️ Pick-and-Place Centroid CSV (.csv)
+                         </button>
+                      </div>
+                   </div>
+
+                   <button 
+                     onClick={() => triggerDownload("bom.csv", generateBOMCSV(board))}
+                     className="w-full mt-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[10px] font-black uppercase tracking-wider transition-all"
+                   >
+                     📋 Download Consolidated BOM (.csv)
+                   </button>
+                </div>
+             </div>
+
+             <div className="border-t border-white/5 pt-4 text-center">
+                <p className="text-[9px] text-gray-600 font-mono">All files are generated strictly on client side according to industry-standard specifications.</p>
+             </div>
+          </div>
+        </div>
       )}
     </div>
   );

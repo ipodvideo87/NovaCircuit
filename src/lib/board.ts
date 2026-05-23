@@ -1,4 +1,4 @@
-import { ProjectGraph } from '../types';
+import { ProjectGraph, NetClass, DifferentialPair } from '../types';
 import { GlobalLibrary, FootprintDefinition } from './componentLibrary';
 
 export type BoardLayer = "F.Cu" | "B.Cu" | "F.Silkscreen" | "B.Silkscreen" | "Edge.Cuts";
@@ -84,6 +84,8 @@ export interface PCBBoard {
   keepouts: KeepoutZone[];
   outline: BoardOutline;
   ratnest: RatnestLine[];
+  netClasses?: NetClass[];
+  diffPairs?: DifferentialPair[];
 }
 
 const padDerivationCache = new Map<string, { hash: string, pads: BoardPad[] }>();
@@ -107,7 +109,9 @@ export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
     vias: graph.vias ? [...graph.vias] : [],
     keepouts: graph.keepouts ? [...graph.keepouts] : [],
     outline: graph.outline ? graph.outline : { points: [{x:-50,y:-50},{x:50,y:-50},{x:50,y:50},{x:-50,y:50}] },
-    ratnest: []
+    ratnest: [],
+    netClasses: graph.netClasses ? [...graph.netClasses] : [],
+    diffPairs: graph.diffPairs ? [...graph.diffPairs] : []
   };
 
   // Build O(1) lookup map for fast pad-to-net resolution

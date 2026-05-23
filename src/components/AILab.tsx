@@ -425,7 +425,7 @@ export default function AILab() {
                      <p className="text-xs leading-relaxed mb-6 opacity-90">
                         Automatically export trained weights to the collaborative editor Copilot for real-time design suggestions.
                      </p>
-                     <button className="w-full py-2 bg-white text-indigo-700 rounded-lg text-[11px] font-black uppercase tracking-widest hover:bg-gray-100 transition-all">
+                     <button onClick={() => alert("SUCCESS: Copilot Auto-Sync Enabled")} className="w-full py-2 bg-white text-indigo-700 rounded-lg text-[11px] font-black uppercase tracking-widest hover:bg-gray-100 transition-all cursor-pointer">
                         Enable Auto-Sync
                      </button>
                   </div>

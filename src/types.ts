@@ -71,6 +71,27 @@ export interface Net {
   connections: ComponentPin[]; // Which pins are connected to this net
 }
 
+export interface NetClass {
+  id: string;
+  name: string;
+  minWidth: number; // in mm
+  minSpacing: number; // in mm
+  viaSize?: { drillSize: number; padSize: number };
+  impedanceOhms?: number; // target single-ended impedance
+}
+
+export interface DifferentialPair {
+  id: string;
+  name: string; // e.g. "USB_D"
+  positiveNetId: string; // e.g. net-USB_DP
+  negativeNetId: string; // e.g. net-USB_DN
+  spacing: number; // in mm
+  width: number; // in mm
+  skewTolerance: number; // Max length skew (mm) before violation
+  targetImpedance?: number; // Target differential impedance in Ohms
+  maxUncoupledLength?: number; // Max length in mm they can run uncoupled
+}
+
 import { BoardTrace, Via, KeepoutZone, BoardOutline } from './lib/board';
 
 /**
@@ -84,6 +105,8 @@ export interface ProjectGraph {
   vias?: Via[];
   keepouts?: KeepoutZone[];
   outline?: BoardOutline;
+  netClasses?: NetClass[];
+  diffPairs?: DifferentialPair[];
 }
 
 /**

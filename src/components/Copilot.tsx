@@ -253,7 +253,7 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
            <button 
              key={i} 
              onClick={() => { setInput(tool.cmd); handleSend(); }}
-             className="px-3 py-1.5 bg-white/5 hover:bg-indigo-500/10 border border-white/5 hover:border-indigo-500/20 rounded text-[10px] font-bold text-gray-500 hover:text-indigo-400 transition-all flex items-center gap-1.5 whitespace-nowrap"
+             className="min-h-[44px] px-3 bg-white/5 hover:bg-indigo-500/10 border border-white/5 hover:border-indigo-500/20 rounded text-[10px] font-bold text-gray-500 hover:text-indigo-400 transition-all flex items-center gap-1.5 whitespace-nowrap"
            >
              {tool.icon}
              {tool.label}
@@ -283,7 +283,7 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
             type="button"
             onClick={handleSend}
             disabled={!input.trim() || isTyping}
-            className="absolute right-3 top-1/2 -translate-y-1/2 bg-indigo-600/10 hover:bg-indigo-600 text-indigo-500 hover:text-white p-2 rounded transition-all disabled:opacity-10"
+            className="absolute right-2 top-1/2 -translate-y-1/2 bg-indigo-600/10 hover:bg-indigo-600 text-indigo-500 hover:text-white min-w-[44px] min-h-[44px] flex items-center justify-center rounded transition-all disabled:opacity-10"
           >
             <Send size={14} />
           </button>

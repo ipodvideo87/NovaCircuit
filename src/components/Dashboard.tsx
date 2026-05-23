@@ -89,7 +89,7 @@ export default function Dashboard({
       {/* Mobile Sidebar Toggle */}
       <button 
         onClick={() => setSidebarOpen(!sidebarOpen)}
-        className="lg:hidden fixed top-4 left-4 z-[100] p-2 bg-[#0d0d0d] border border-white/10 rounded-lg text-gray-400"
+        className="lg:hidden fixed top-4 left-4 z-[100] p-2 bg-[#0d0d0d] border border-white/10 rounded-lg text-gray-400 min-w-[44px] min-h-[44px] flex items-center justify-center cursor-pointer"
       >
         <Menu size={20} />
       </button>
@@ -107,7 +107,7 @@ export default function Dashboard({
             </div>
             <button 
               onClick={() => setSidebarOpen(false)}
-              className="lg:hidden p-2 text-gray-600"
+              className="lg:hidden p-2 text-gray-600 min-w-[44px] min-h-[44px] flex items-center justify-center cursor-pointer"
             >
               <Menu size={20} />
             </button>
@@ -115,7 +115,7 @@ export default function Dashboard({
 
           <button 
             onClick={() => onOpenProject('new')}
-            className="w-full flex items-center justify-center gap-2 bg-white text-black hover:bg-gray-200 py-3 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-all mb-8 shadow-xl active:scale-95 cursor-pointer"
+            className="w-full flex items-center justify-center gap-2 bg-white text-black hover:bg-gray-200 py-3 min-h-[44px] rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-all mb-8 shadow-xl active:scale-95 cursor-pointer"
           >
             <Plus size={16} />
             New Project
@@ -136,7 +136,7 @@ export default function Dashboard({
                   if (item.label === 'AI Lab') onOpenAILab();
                 }}
                 className={cn(
-                  "w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors cursor-pointer",
+                  "w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] rounded-lg text-sm transition-colors cursor-pointer",
                   item.active ? "bg-white/5 text-white font-medium" : "text-gray-500 hover:text-gray-300 hover:bg-white/5"
                 )}
               >
@@ -149,7 +149,7 @@ export default function Dashboard({
           <div className="mt-10">
             <div className="flex items-center justify-between px-3 mb-4">
               <span className="text-[10px] uppercase font-bold text-gray-600 tracking-widest">Teams</span>
-              <Plus size={14} className="text-gray-600 cursor-pointer hover:text-white" />
+              <button onClick={() => alert("INFO: Team creation coming in next release.")} className="min-w-[44px] min-h-[44px] flex items-center justify-end text-gray-600 hover:text-white cursor-pointer -mr-2"><Plus size={14} /></button>
             </div>
             <div className="space-y-1">
                 {[
@@ -157,7 +157,7 @@ export default function Dashboard({
                   { name: 'Core OS', color: 'bg-purple-500' },
                   { name: 'Energy', color: 'bg-amber-500' }
                 ].map(team => (
-                  <button key={team.name} className="w-full flex items-center justify-between px-3 py-2 text-sm text-gray-400 hover:text-white transition-colors group cursor-pointer">
+                  <button onClick={() => alert(`INFO: Switched workspace context to ${team.name}`)} key={team.name} className="w-full flex items-center justify-between px-3 py-2 min-h-[44px] text-sm text-gray-400 hover:text-white transition-colors group cursor-pointer">
                     <div className="flex items-center gap-3">
                        <div className={cn("w-2 h-2 rounded-full shadow-[0_0_8px_rgba(99,102,241,0.4)]", team.color)} />
                        {team.name}
@@ -170,11 +170,11 @@ export default function Dashboard({
         </div>
 
         <div className="mt-auto p-6 space-y-1 border-t border-white/10">
-           <button className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-500 hover:text-gray-300 transition-colors cursor-pointer">
+           <button onClick={() => alert("INFO: Billing preview not available.")} className="w-full flex items-center gap-3 px-3 py-2 min-h-[44px] text-sm text-gray-500 hover:text-gray-300 transition-colors cursor-pointer">
               <CreditCard size={18} />
               Billing
            </button>
-           <button className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-500 hover:text-gray-300 transition-colors cursor-pointer">
+           <button onClick={() => alert("INFO: General settings not available.")} className="w-full flex items-center gap-3 px-3 py-2 min-h-[44px] text-sm text-gray-500 hover:text-gray-300 transition-colors cursor-pointer">
               <Settings size={18} />
               Settings
            </button>
@@ -205,10 +205,10 @@ export default function Dashboard({
            </div>
 
            <div className="hidden sm:flex items-center gap-4 shrink-0">
-             <button className="p-2 text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer">
+             <button onClick={() => alert("INFO: No new notifications.")} className="p-2 min-w-[44px] min-h-[44px] flex justify-center items-center text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer">
                <Bell size={20} />
              </button>
-             <button className="px-4 py-1.5 border border-zinc-800 hover:border-zinc-700 rounded-lg text-sm font-medium transition-all cursor-pointer">
+             <button onClick={() => alert("INFO: Upgrades disabled in preview.")} className="px-4 py-1.5 min-h-[44px] border border-zinc-800 hover:border-zinc-700 rounded-lg text-sm font-medium transition-all cursor-pointer">
                Upgrade
              </button>
            </div>
@@ -271,8 +271,8 @@ export default function Dashboard({
                 <div className="p-5 flex-1 flex flex-col">
                    <div className="flex items-start justify-between mb-1">
                      <h3 className="font-bold text-lg leading-tight group-hover:text-indigo-400 transition-colors text-white">{project.name}</h3>
-                     <button className="p-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <MoreHorizontal size={18} className="text-gray-500" />
+                     <button onClick={(e) => { e.stopPropagation(); alert("INFO: Context menu coming soon.")}} className="p-1 opacity-0 group-hover:opacity-100 transition-opacity min-w-[44px] min-h-[44px] flex items-center justify-center -mr-2 -mt-2">
+                        <MoreHorizontal size={18} className="text-gray-500 hover:text-white" />
                      </button>
                    </div>
                    <p className="text-gray-500 text-sm line-clamp-1 mb-4">{project.description}</p>
@@ -293,7 +293,7 @@ export default function Dashboard({
             ))}
             
             {/* New Project Outline */}
-            <button className="border-2 border-dashed border-white/5 hover:border-white/10 rounded-2xl flex flex-col items-center justify-center p-8 gap-4 group transition-all cursor-pointer h-[320px]">
+            <button onClick={() => onOpenProject('new')} className="border-2 border-dashed border-white/5 hover:border-white/10 rounded-2xl flex flex-col items-center justify-center p-8 gap-4 group transition-all cursor-pointer h-[320px]">
                <div className="w-12 h-12 rounded-full bg-white/5 flex items-center justify-center text-gray-600 group-hover:scale-110 group-hover:bg-white/10 group-hover:text-white transition-all">
                   <Plus size={24} />
                </div>
