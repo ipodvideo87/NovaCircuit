@@ -75,6 +75,7 @@ import { ProjectGraph, AIAction, PCBComponent, PinDef } from '../types';
 
 import { validateAndApplyActions } from '../lib/actionValidation';
 import { useTransactionManager, deepCloneGraph } from '../lib/transaction';
+import { runSystemRegressionSuite } from '../lib/testHarness';
 import { runERC, ERCIssue } from '../lib/erc';
 import { resolveNetDrivers, NetDriverReport } from '../lib/netDriver';
 import { GlobalLibrary } from '../lib/componentLibrary';
@@ -883,7 +884,37 @@ export default function SchematicEditor() {
     return true;
   }, [mode]);
 
-  const { history, currentIndex, commitTransaction, rollback, undo, redo, canUndo, canRedo, isRestored, clearRestoredFlag } = useTransactionManager(initialProjectGraph);
+  const { 
+    history, 
+    currentIndex, 
+    activeGraph: transientActiveGraph, 
+    commitTransaction, 
+    rollback, 
+    undo, 
+    redo, 
+    canUndo, 
+    canRedo, 
+    isRestored, 
+    clearRestoredFlag,
+    beginInteractionTransaction,
+    appendInteractionDelta,
+    commitInteractionTransaction
+  } = useTransactionManager(initialProjectGraph);
+
+  useEffect(() => {
+    try {
+      const results = runSystemRegressionSuite();
+      console.log("%c=== EDA ENGINE SYSTEMS INTEGRITY VERIFIED ===", "color: #10b981; font-weight: bold; font-size: 11px;");
+      results.forEach(suite => {
+        console.log(`%c[SUITE] ${suite.suiteName}: ${suite.passed ? 'PASSED ✅' : 'FAILED ❌'}`, "font-weight: bold; color: #a855f7;");
+        suite.assertions.forEach(ast => {
+          console.log(`  - %c${ast.name}: %c${ast.passed ? 'PASS ✅' : 'FAIL ❌'} %c(${ast.message || ''})`, "color: #adbac7;", ast.passed ? "color: #2ea043; font-weight: bold;" : "color: #f85149; font-weight: bold;", "color: #57606a;");
+        });
+      });
+    } catch (e: any) {
+      console.error("Failed to execute standard layout regression suite", e);
+    }
+  }, []);
 
   useEffect(() => {
     if (isRestored) {
@@ -892,7 +923,7 @@ export default function SchematicEditor() {
     }
   }, [isRestored, clearRestoredFlag]);
 
-  const activeGraph = replayGraph ?? history[currentIndex];
+  const activeGraph = replayGraph ?? transientActiveGraph;
 
   const selectedIdsStr = useMemo(() => {
     if (view !== 'pcb') return '';

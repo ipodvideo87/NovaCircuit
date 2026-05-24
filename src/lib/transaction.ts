@@ -53,10 +53,22 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
     return [deepCloneGraph(initialState)];
   });
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [activeGraph, setActiveGraph] = useState<ProjectGraph>(() => deepCloneGraph(history ? history[0] : initialState));
 
   const historyRef = useRef(history);
   const indexRef = useRef(currentIndex);
   
+  // Interaction memory state (Transient tracking)
+  const interactionBaseRef = useRef<ProjectGraph | null>(null);
+  const isInsideInteractionRef = useRef(false);
+
+  // Sync active component layout when initial changes occur or history updates
+  useEffect(() => {
+    historyRef.current = history;
+    indexRef.current = currentIndex;
+    setActiveGraph(deepCloneGraph(history[currentIndex]));
+  }, [history, currentIndex]);
+
   // Throttle autosaves
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -75,6 +87,7 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
     
     setHistory(nextHistory);
     setCurrentIndex(nextHistory.length - 1);
+    setActiveGraph(clonedGraph);
 
     // Debounced autosave
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
@@ -93,7 +106,9 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
       const newIndex = indexRef.current - 1;
       indexRef.current = newIndex;
       setCurrentIndex(newIndex);
-      return historyRef.current[newIndex];
+      const prevGraph = historyRef.current[newIndex];
+      setActiveGraph(deepCloneGraph(prevGraph));
+      return prevGraph;
     }
     return null;
   }, []);
@@ -103,7 +118,9 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
       const newIndex = indexRef.current + 1;
       indexRef.current = newIndex;
       setCurrentIndex(newIndex);
-      return historyRef.current[newIndex];
+      const nextGraph = historyRef.current[newIndex];
+      setActiveGraph(deepCloneGraph(nextGraph));
+      return nextGraph;
     }
     return null;
   }, []);
@@ -114,9 +131,37 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
 
   const clearRestoredFlag = useCallback(() => setIsRestored(false), []);
 
+  /**
+   * Initializes a transient workspace interaction state.
+   */
+  const beginInteractionTransaction = useCallback(() => {
+    interactionBaseRef.current = deepCloneGraph(historyRef.current[indexRef.current]);
+    isInsideInteractionRef.current = true;
+  }, []);
+
+  /**
+   * Appends intermediate layout changes without logging history checkpoints.
+   */
+  const appendInteractionDelta = useCallback((updatedGraph: ProjectGraph) => {
+    if (!isInsideInteractionRef.current) {
+      beginInteractionTransaction();
+    }
+    setActiveGraph(deepCloneGraph(updatedGraph));
+  }, [beginInteractionTransaction]);
+
+  /**
+   * Commits the final accumulated state as a single history record.
+   */
+  const commitInteractionTransaction = useCallback((finalGraph: ProjectGraph) => {
+    isInsideInteractionRef.current = false;
+    interactionBaseRef.current = null;
+    commitTransaction(finalGraph);
+  }, [commitTransaction]);
+
   return {
     history,
     currentIndex,
+    activeGraph,
     commitTransaction,
     undo,
     redo,
@@ -125,5 +170,8 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
     canRedo: currentIndex < history.length - 1,
     isRestored,
     clearRestoredFlag,
+    beginInteractionTransaction,
+    appendInteractionDelta,
+    commitInteractionTransaction
   };
 }

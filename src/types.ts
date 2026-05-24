@@ -55,6 +55,10 @@ export interface PCBComponent {
   properties: Record<string, string | number>; // e.g., { value: "10k", tolerance: "1%" }
   metadata?: ComponentMetadata;
   pins: PinDef[];         // List of valid pin definitions
+  
+  // Hierarchical scope
+  hierarchyPath?: string; // Path representation (e.g., "root/SensorBlock/Power")
+  parentSheetId?: string; // Direct parent sheet ID
 }
 
 // Represents a specific pin on a specific component
@@ -69,6 +73,10 @@ export interface Net {
   netClass: "POWER" | "GROUND" | "SIGNAL" | "DIFFERENTIAL" | "DEFAULT";
   type: NetType;
   connections: ComponentPin[]; // Which pins are connected to this net
+  
+  // Hierarchical net mapping
+  localNetScope?: string;  // Associated sheet ID
+  compiledNetId?: string;   // Globals/resolved unique mangled identifier
 }
 
 export interface NetClass {
@@ -95,6 +103,60 @@ export interface DifferentialPair {
 import { BoardTrace, Via, KeepoutZone, BoardOutline } from './lib/board';
 
 /**
+ * Hierarchical ports that allow wire connections between sheets.
+ */
+export interface HierarchicalPort {
+  id: string;
+  name: string; // e.g., "V_IN", "SPI_CLK"
+  direction: "input" | "output" | "bidirectional";
+  position?: Point;
+}
+
+/**
+ * Global labels that cross all sheet scopes (e.g., power rails like VCC/GND).
+ */
+export interface GlobalLabel {
+  id: string;
+  name: string;
+  position?: Point;
+}
+
+/**
+ * Connects peer sheets together horizontally without strict hierarchy trees.
+ */
+export interface OffSheetConnector {
+  id: string;
+  name: string;
+  position?: Point;
+}
+
+/**
+ * Represents a single block placed inside a parent sheet referencing a child sheet layout.
+ */
+export interface SheetSymbol {
+  id: string;
+  designator: string; // e.g., "BLOCK1"
+  referencedSheetId: string; // The ID of the ProjectSheet it instances
+  position: Point;
+  ports: HierarchicalPort[]; // Interfacing pins on the block
+}
+
+/**
+ * Represents an independent sheet in the project DAG.
+ */
+export interface ProjectSheet {
+  id: string;
+  name: string; // e.g., "CPU_Core", "PowerDelivery"
+  parentSheetId: string | null; // Null-root, otherwise points to parent ID
+  components: PCBComponent[];
+  nets: Net[];
+  sheetSymbols: SheetSymbol[];
+  ports: HierarchicalPort[];
+  globalLabels: GlobalLabel[];
+  offSheetConnectors: OffSheetConnector[];
+}
+
+/**
  * The complete structured Project Graph
  * This is what gets sent to the AI for reasoning.
  */
@@ -107,6 +169,10 @@ export interface ProjectGraph {
   outline?: BoardOutline;
   netClasses?: NetClass[];
   diffPairs?: DifferentialPair[];
+  
+  // Multi-sheet and Hierarchy Support
+  sheets?: ProjectSheet[];
+  activeSheetId?: string; // Currently focused sheet in the viewport
 }
 
 /**

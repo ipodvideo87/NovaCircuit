@@ -10,13 +10,17 @@ import {
   ShieldCheck,
   Activity,
   Box,
-  Info
+  Info,
+  Plus,
+  Trash2,
+  Edit
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '@/src/lib/utils';
 import { ProjectGraph } from '../types';
 import { syncBoardFromGraph } from '../lib/board';
 import { runDRC, DRCViolation } from '../lib/drc';
+import { resolveNetConstraints, DefaultNetClasses } from '../lib/constraints';
 import { generateGerberRS274X, generateExcellonDrill, generateIPCD356Netlist, generatePickAndPlaceCSV, generateBOMCSV } from '../lib/exporter';
 import { ThreeDBoardViewer } from './ThreeDBoardViewer';
 
@@ -355,6 +359,165 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
 
   // Synchronize Schematic Graph to PCB Board Deterministically
   const board = useMemo(() => syncBoardFromGraph(graph), [graph]);
+
+  // Constraint Manager & Net-Class States
+  const [rightSidebarTab, setRightSidebarTab] = useState<'board' | 'constraints'>('board');
+  const [selectedNetClassId, setSelectedNetClassId] = useState<string>('nc-default');
+  const [showAddClassModal, setShowAddClassModal] = useState(false);
+  const [newClassName, setNewClassName] = useState("");
+  
+  // Matched Pair Setup States
+  const [showAddDpModal, setShowAddDpModal] = useState(false);
+  const [newDpName, setNewDpName] = useState("");
+  const [newDpPosNet, setNewDpPosNet] = useState("");
+  const [newDpNegNet, setNewDpNegNet] = useState("");
+
+  const activeNetClasses = useMemo(() => {
+    if (graph.netClasses && graph.netClasses.length > 0) {
+      return graph.netClasses;
+    }
+    return DefaultNetClasses;
+  }, [graph.netClasses]);
+
+  const activeDiffPairs = useMemo(() => {
+    return graph.diffPairs || [];
+  }, [graph.diffPairs]);
+
+  const handleUpdateNetClass = useCallback((ncId: string, updatedFields: Partial<any>) => {
+    const list = graph.netClasses && graph.netClasses.length > 0 
+      ? [...graph.netClasses] 
+      : DefaultNetClasses.map(nc => ({ ...nc }));
+      
+    const idx = list.findIndex(nc => nc.id === ncId);
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...updatedFields };
+    } else {
+      // If it resided in default list but not yet committed on graph
+      const defaultMatch = DefaultNetClasses.find(nc => nc.id === ncId);
+      if (defaultMatch) {
+        list.push({ ...defaultMatch, ...updatedFields });
+      } else {
+        return;
+      }
+    }
+    
+    const newGraph = {
+      ...graph,
+      netClasses: list
+    };
+    onCommitTransaction?.(newGraph);
+    showToast(`SUCCESS: Rules updated securely`);
+  }, [graph, onCommitTransaction, showToast]);
+
+  const handleAddNetClass = useCallback((name: string) => {
+    const trimmed = name.trim().toUpperCase();
+    if (!trimmed) return;
+    const list = graph.netClasses && graph.netClasses.length > 0 
+      ? [...graph.netClasses] 
+      : DefaultNetClasses.map(nc => ({ ...nc }));
+
+    if (list.some(nc => nc.name === trimmed)) {
+      showToast("WARN: Net class already exists");
+      return;
+    }
+
+    const newClass = {
+      id: `nc-${trimmed.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`,
+      name: trimmed,
+      minWidth: 0.2,
+      minSpacing: 0.2,
+      viaSize: { drillSize: 0.3, padSize: 0.6 },
+      impedanceOhms: 50
+    };
+
+    list.push(newClass);
+    const newGraph = {
+      ...graph,
+      netClasses: list
+    };
+    onCommitTransaction?.(newGraph);
+    setSelectedNetClassId(newClass.id);
+    setNewClassName("");
+    setShowAddClassModal(false);
+    showToast(`SUCCESS: Net Class [${trimmed}] created`);
+  }, [graph, onCommitTransaction, showToast]);
+
+  const handleDeleteNetClass = useCallback((id: string) => {
+    if (id === 'nc-default') {
+      showToast("WARN: DEFAULT class cannot be deleted");
+      return;
+    }
+    const list = graph.netClasses ? graph.netClasses.filter(c => c.id !== id) : [];
+    const newGraph = {
+      ...graph,
+      netClasses: list
+    };
+    onCommitTransaction?.(newGraph);
+    setSelectedNetClassId('nc-default');
+    showToast("SUCCESS: Net class removed");
+  }, [graph, onCommitTransaction, showToast]);
+
+  const handleAssignNetClass = useCallback((netId: string, className: string) => {
+    const newNets = graph.nets.map(n => {
+      if (n.id === netId) {
+        return { ...n, netClass: className as any };
+      }
+      return n;
+    });
+    const newGraph = {
+      ...graph,
+      nets: newNets
+    };
+    onCommitTransaction?.(newGraph);
+    showToast("SUCCESS: Association updated");
+  }, [graph, onCommitTransaction, showToast]);
+
+  const handleCreateDiffPair = useCallback(() => {
+    const trimmed = newDpName.trim().toUpperCase();
+    if (!trimmed || !newDpPosNet || !newDpNegNet) {
+      showToast("WARN: Please supply name and both net assignments");
+      return;
+    }
+    const list = graph.diffPairs ? [...graph.diffPairs] : [];
+    if (list.some(dp => dp.name === trimmed)) {
+      showToast("WARN: Differential pair name already exists");
+      return;
+    }
+
+    const newPair = {
+      id: `dp-${trimmed.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`,
+      name: trimmed,
+      positiveNetId: newDpPosNet,
+      negativeNetId: newDpNegNet,
+      spacing: 0.25,
+      width: 0.15,
+      skewTolerance: 0.5,
+      targetImpedance: 90,
+      maxUncoupledLength: 5.0
+    };
+
+    list.push(newPair);
+    const newGraph = {
+      ...graph,
+      diffPairs: list
+    };
+    onCommitTransaction?.(newGraph);
+    setNewDpName("");
+    setNewDpPosNet("");
+    setNewDpNegNet("");
+    setShowAddDpModal(false);
+    showToast(`SUCCESS: Matched Pair Group [${trimmed}] Registered`);
+  }, [graph, newDpName, newDpPosNet, newDpNegNet, onCommitTransaction, showToast]);
+
+  const handleDeleteDiffPair = useCallback((dpId: string) => {
+    const pairs = graph.diffPairs ? graph.diffPairs.filter(p => p.id !== dpId) : [];
+    const newGraph = {
+      ...graph,
+      diffPairs: pairs
+    };
+    onCommitTransaction?.(newGraph);
+    showToast("SUCCESS: Matched Pair configuration removed");
+  }, [graph, onCommitTransaction, showToast]);
 
   const isElementVisible = useCallback((bx: number, by: number, radius = 5) => {
     if (!boardRef.current) return true;
@@ -731,10 +894,11 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
                   }
                 }
 
+                const rules = resolveNetConstraints(board, pad.netId);
                 setRoutingState({
                   activeNetId: pad.netId,
                   layer: pad.layer.includes('F.Cu') ? 'F.Cu' : 'B.Cu',
-                  width: 0.25,
+                  width: rules.preferredWidth || rules.minWidth || 0.25,
                   points: [{ x: pad.x, y: pad.y }]
                 });
             } else {
@@ -1475,77 +1639,408 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
 
       {/* Right Sidebar - Layers & Inspector */}
       {!isMobile && (
-        <aside className="w-64 border-l border-white/5 bg-[#0d0d0d] flex flex-col shrink-0">
-          <div className="p-4 border-b border-white/5 flex items-center justify-between h-12 bg-[#0a0a0a]">
-              <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-white">Board State</h3>
-              <Settings size={14} className="text-gray-600" />
-          </div>
-          
-          <div className="p-4 space-y-4">
-              {layers.map(layer => (
-                <div key={layer.id} className="flex items-center justify-between group cursor-pointer" onClick={() => toggleLayer(layer.id)}>
-                  <div className="flex items-center gap-3">
-                      <div className={cn("w-3 h-3 rounded-full", layer.color, !layer.visible && "opacity-20")} />
-                      <span className={cn("text-[11px] font-bold uppercase tracking-tight transition-colors", layer.visible ? "text-gray-300" : "text-gray-600")}>
-                        {layer.name}
-                      </span>
-                  </div>
-                  <button className="opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => { e.stopPropagation(); toggleLayer(layer.id); }}>
-                      <Eye size={14} className={cn(layer.visible ? "text-gray-400" : "text-gray-700")} />
-                  </button>
-                </div>
-              ))}
-          </div>
-
-          <div className="px-4 py-2 border-y border-white/5 bg-[#0a0a0a]">
-            <h4 className="text-[9px] uppercase tracking-[0.1em] font-bold text-gray-500 mb-2">DRC Status</h4>
-            {drcViolations.length === 0 ? (
-               <div className="text-[10px] text-emerald-400 flex items-center gap-1 font-bold">
-                 <ShieldCheck size={12} /> Design passes basic DRC.
-               </div>
-            ) : (
-               <div className="flex flex-col gap-1 max-h-32 overflow-y-auto">
-                 {drcViolations.map(err => (
-                   <div key={err.id} className="text-[9px] text-rose-400 bg-rose-500/10 p-1.5 rounded">{err.message}</div>
-                 ))}
-               </div>
-            )}
+        <aside className="w-64 border-l border-white/5 bg-[#0d0d0d] flex flex-col shrink-0 overflow-hidden">
+          {/* Tab switches */}
+          <div className="flex border-b border-white/5 h-12 bg-[#0a0a0a] items-center shrink-0">
+            <button
+              onClick={() => setRightSidebarTab('board')}
+              className={cn(
+                "flex-1 h-full text-[9px] uppercase font-black tracking-widest transition-all",
+                rightSidebarTab === 'board'
+                  ? "text-white bg-[#0d0d0d] border-b-2 border-indigo-500"
+                  : "text-zinc-500 hover:text-zinc-300"
+              )}
+            >
+              System
+            </button>
+            <button
+              onClick={() => setRightSidebarTab('constraints')}
+              className={cn(
+                "flex-1 h-full text-[9px] uppercase font-black tracking-widest transition-all border-l border-white/5",
+                rightSidebarTab === 'constraints'
+                  ? "text-white bg-[#0d0d0d] border-b-2 border-indigo-500"
+                  : "text-zinc-500 hover:text-zinc-300"
+              )}
+            >
+              Constraints
+            </button>
           </div>
 
-          <div className="mt-auto p-4 bg-[#0a0a0a]">
-              <div className="p-4 bg-white/2 border border-white/5 rounded-2xl flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                    <span className="text-[10px] uppercase font-bold text-gray-500">Unrouted Nets</span>
-                    <span className="text-xs font-mono font-bold text-white">{board.ratnest.length} Airwires</span>
-                </div>
-                <div className="flex flex-col gap-2 mt-2">
-                  <button 
-                    onClick={startAutoFix}
-                    disabled={isFixing || isReadOnly}
-                    className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-600/30 text-emerald-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
-                  >
-                      <ShieldCheck size={14} className={isFixing ? "animate-spin" : ""} />
-                      {isReadOnly ? `${mode === 'replay' ? 'Replay' : 'Inspect'} Mode (Read)` : isFixing ? `Scanning...` : "Run AI DRC Check"}
-                  </button>
-
-                  <button 
-                    onClick={() => setShowThreeD(true)}
-                    className="w-full py-2 bg-indigo-600/10 hover:bg-indigo-600/25 border border-indigo-500/20 text-indigo-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                      <Maximize2 size={14} />
-                      Interactive 3D View
-                  </button>
-
-                  <button 
-                    onClick={() => setShowExportModal(true)}
-                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-indigo-500/10"
-                  >
-                      <Settings size={14} />
-                      Export Gerber/PnP
-                  </button>
+          {rightSidebarTab === 'board' ? (
+            <div className="flex-1 flex flex-col min-h-0 overflow-y-auto">
+              {/* Layers Group */}
+              <div className="p-4 space-y-4 shrink-0">
+                <h4 className="text-[9px] uppercase tracking-[0.1em] font-extrabold text-gray-500">Board Layers</h4>
+                <div className="space-y-3">
+                  {layers.map(layer => (
+                    <div key={layer.id} className="flex items-center justify-between group cursor-pointer" onClick={() => toggleLayer(layer.id)}>
+                      <div className="flex items-center gap-3">
+                          <div className={cn("w-3 h-3 rounded-full", layer.color, !layer.visible && "opacity-20")} />
+                          <span className={cn("text-[11px] font-bold uppercase tracking-tight transition-colors", layer.visible ? "text-gray-300" : "text-gray-600")}>
+                            {layer.name}
+                          </span>
+                      </div>
+                      <button className="opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => { e.stopPropagation(); toggleLayer(layer.id); }}>
+                          <Eye size={14} className={cn(layer.visible ? "text-gray-400" : "text-gray-700")} />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </div>
-          </div>
+
+              {/* DRC Status */}
+              <div className="px-4 py-3 border-y border-white/5 bg-[#0a0a0a] shrink-0">
+                <h4 className="text-[9px] uppercase tracking-[0.1em] font-extrabold text-gray-400 mb-2">DRC Status</h4>
+                {drcViolations.length === 0 ? (
+                   <div className="text-[10px] text-emerald-400 flex items-center gap-1 font-bold">
+                     <ShieldCheck size={12} /> Design passes basic DRC.
+                   </div>
+                ) : (
+                   <div className="flex flex-col gap-1.5 max-h-48 overflow-y-auto pr-1">
+                     {drcViolations.map(err => (
+                       <div key={err.id} className="text-[9px] text-rose-400 bg-rose-500/5 p-2 border border-rose-500/10 rounded-xl flex flex-col gap-0.5">
+                         <span className="font-extrabold uppercase text-[8px] text-rose-300 tracking-wider">● {err.type}</span>
+                         <span className="leading-tight">{err.message}</span>
+                       </div>
+                     ))}
+                   </div>
+                )}
+              </div>
+
+              {/* System Action buttons at bottom */}
+              <div className="mt-auto p-4 bg-[#0a0a0a] shrink-0 border-t border-white/5">
+                <div className="p-4 bg-white/2 border border-white/5 rounded-2xl flex flex-col gap-3">
+                  <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase font-bold text-gray-500">Unrouted Nets</span>
+                      <span className="text-xs font-mono font-bold text-white">{board.ratnest.length} Airwires</span>
+                  </div>
+                  <div className="flex flex-col gap-2 mt-2">
+                    <button 
+                      onClick={startAutoFix}
+                      disabled={isFixing || isReadOnly}
+                      className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-600/30 text-emerald-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                        <ShieldCheck size={14} className={isFixing ? "animate-spin" : ""} />
+                        {isReadOnly ? `${mode === 'replay' ? 'Replay' : 'Inspect'} Mode (Read)` : isFixing ? `Scanning...` : "Run AI DRC Check"}
+                    </button>
+
+                    <button 
+                      onClick={() => setShowThreeD(true)}
+                      className="w-full py-2 bg-indigo-600/10 hover:bg-indigo-600/25 border border-indigo-500/20 text-indigo-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                        <Maximize2 size={14} />
+                        Interactive 3D View
+                    </button>
+
+                    <button 
+                      onClick={() => setShowExportModal(true)}
+                      className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-indigo-500/10"
+                    >
+                        <Settings size={14} />
+                        Export Gerber/PnP
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col min-h-0 overflow-y-auto p-4 space-y-4 font-mono text-[10px]">
+              
+              {/* Part A: SELECT OR EDIT NET CLASSES */}
+              <div className="space-y-2 border-b border-white/5 pb-4 shrink-0">
+                <div className="flex items-center justify-between">
+                  <span className="text-[9px] uppercase font-extrabold tracking-widest text-zinc-400">NET CLASS EDITOR</span>
+                  <div className="flex gap-1">
+                    <button 
+                      onClick={() => setShowAddClassModal(true)}
+                      title="Add net class"
+                      className="p-1 px-1.5 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 rounded cursor-pointer transition-all flex items-center justify-center"
+                    >
+                      <Plus size={10} />
+                    </button>
+                    {selectedNetClassId !== 'nc-default' && (
+                      <button 
+                        onClick={() => handleDeleteNetClass(selectedNetClassId)}
+                        title="Delete selected class"
+                        className="p-1 px-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 rounded cursor-pointer transition-all flex items-center justify-center"
+                      >
+                        <Trash2 size={10} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <select 
+                  value={selectedNetClassId}
+                  onChange={(e) => setSelectedNetClassId(e.target.value)}
+                  className="w-full bg-[#141414] border border-white/10 rounded-xl p-2 text-white font-mono text-[11px] outline-none cursor-pointer"
+                >
+                  {activeNetClasses.map(nc => (
+                    <option key={nc.id} value={nc.id}>{nc.name}</option>
+                  ))}
+                </select>
+
+                {/* FIELDS FOR THE SELECTED NET CLASS */}
+                {(() => {
+                  const activeClass = activeNetClasses.find(nc => nc.id === selectedNetClassId);
+                  if (!activeClass) return null;
+
+                  return (
+                    <div className="space-y-3 mt-3 bg-[#111111]/40 border border-white/5 rounded-xl p-3">
+                      
+                      {/* Inheritance Dropdown */}
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[8px] text-zinc-500 font-extrabold uppercase">INHERITS FROM</span>
+                        <select 
+                          value={(activeClass as any).parentId || "DEFAULT"}
+                          onChange={(e) => handleUpdateNetClass(selectedNetClassId, { parentId: e.target.value === "DEFAULT" ? undefined : e.target.value })}
+                          className="w-full bg-[#181818] border border-white/5 rounded px-1.5 py-1 text-zinc-300 text-[10px] outline-none cursor-pointer"
+                        >
+                          <option value="DEFAULT">DEFAULT Class (root)</option>
+                          {activeNetClasses.filter(nc => nc.id !== selectedNetClassId && nc.name !== "DEFAULT").map(nc => (
+                            <option key={nc.id} value={nc.id}>{nc.name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Widths values */}
+                      <div className="grid grid-cols-2 gap-2 text-[9px]">
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[8px] text-zinc-500 font-extrabold">MIN WIDTH (mm)</span>
+                          <input 
+                            type="number"
+                            step="0.05"
+                            min="0.1"
+                            value={activeClass.minWidth}
+                            onChange={(e) => handleUpdateNetClass(selectedNetClassId, { minWidth: parseFloat(e.target.value) || 0.1 })}
+                            className="bg-[#181818] text-white border border-white/10 rounded p-1 outline-none text-center"
+                          />
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[8px] text-zinc-500 font-extrabold">PREF WIDTH (mm)</span>
+                          <input 
+                            type="number"
+                            step="0.05"
+                            min="0.10"
+                            value={(activeClass as any).preferredWidth ?? activeClass.minWidth}
+                            onChange={(e) => handleUpdateNetClass(selectedNetClassId, { preferredWidth: parseFloat(e.target.value) || activeClass.minWidth })}
+                            className="bg-[#181818] text-white border border-white/10 rounded p-1 outline-none text-center"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Clearances spacing */}
+                      <div className="grid grid-cols-2 gap-2 text-[9px]">
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[8px] text-zinc-500 font-extrabold">CLEARANCE (mm)</span>
+                          <input 
+                            type="number"
+                            step="0.05"
+                            min="0.1"
+                            value={activeClass.minSpacing}
+                            onChange={(e) => handleUpdateNetClass(selectedNetClassId, { minSpacing: parseFloat(e.target.value) || 0.1 })}
+                            className="bg-[#181818] text-white border border-white/10 rounded p-1 outline-none text-center"
+                          />
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[8px] text-zinc-500 font-extrabold">IMPEDANCE (Ω)</span>
+                          <input 
+                            type="number"
+                            step="5"
+                            placeholder="None"
+                            value={activeClass.impedanceOhms || ""}
+                            onChange={(e) => handleUpdateNetClass(selectedNetClassId, { impedanceOhms: parseInt(e.target.value) || undefined })}
+                            className="bg-[#181818] text-indigo-300 border border-white/10 rounded p-1 placeholder:text-zinc-700 outline-none text-center"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Via Config */}
+                      <div className="grid grid-cols-2 gap-2 text-[9px]">
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[8px] text-zinc-500 font-extrabold">VIA DRILL (mm)</span>
+                          <input 
+                            type="number"
+                            step="0.05"
+                            min="0.1"
+                            value={activeClass.viaSize?.drillSize ?? 0.3}
+                            onChange={(e) => handleUpdateNetClass(selectedNetClassId, { 
+                              viaSize: { 
+                                drillSize: parseFloat(e.target.value) || 0.3,
+                                padSize: activeClass.viaSize?.padSize || 0.6
+                              } 
+                            })}
+                            className="bg-[#181818] text-white border border-white/10 rounded p-1 outline-none text-center"
+                          />
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[8px] text-zinc-500 font-extrabold">VIA PAD (mm)</span>
+                          <input 
+                            type="number"
+                            step="0.05"
+                            min="0.2"
+                            value={activeClass.viaSize?.padSize ?? 0.6}
+                            onChange={(e) => handleUpdateNetClass(selectedNetClassId, { 
+                              viaSize: { 
+                                drillSize: activeClass.viaSize?.drillSize || 0.3, 
+                                padSize: parseFloat(e.target.value) || 0.6 
+                              } 
+                            })}
+                            className="bg-[#181818] text-white border border-white/10 rounded p-1 outline-none text-center"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Matched Length Setup */}
+                      <div className="grid grid-cols-2 gap-2 text-[9px]">
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[8px] text-zinc-500 font-extrabold">LENGTH TARGET (mm)</span>
+                          <input 
+                            type="number"
+                            placeholder="None"
+                            value={(activeClass as any).lengthTarget || ""}
+                            onChange={(e) => handleUpdateNetClass(selectedNetClassId, { lengthTarget: parseFloat(e.target.value) || undefined })}
+                            className="bg-[#181818] text-emerald-300 border border-white/10 rounded p-1 placeholder:text-zinc-700 outline-none text-center"
+                          />
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[8px] text-zinc-500 font-extrabold">TOLERANCE (mm)</span>
+                          <input 
+                            type="number"
+                            step="0.1"
+                            placeholder="±0.5"
+                            value={(activeClass as any).lengthTolerance || ""}
+                            onChange={(e) => handleUpdateNetClass(selectedNetClassId, { lengthTolerance: parseFloat(e.target.value) || undefined })}
+                            className="bg-[#181818] text-zinc-300 border border-white/10 rounded p-1 placeholder:text-zinc-700 outline-none text-center"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Layer Permissions Checkboxes */}
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[8px] text-zinc-500 font-extrabold uppercase">ROUTING LAYERS APPROVED</span>
+                        <div className="flex items-center gap-3 text-[9px] text-zinc-300 mt-1">
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input 
+                              type="checkbox"
+                              checked={!((activeClass as any).allowedLayers?.length) || (activeClass as any).allowedLayers.includes("F.Cu")}
+                              onChange={(e) => {
+                                const allowed: string[] = (activeClass as any).allowedLayers || ["F.Cu", "B.Cu"];
+                                const next = e.target.checked 
+                                  ? [...allowed, "F.Cu"] 
+                                  : allowed.filter(l => l !== "F.Cu");
+                                handleUpdateNetClass(selectedNetClassId, { allowedLayers: next.length ? next : ["F.Cu"] });
+                              }}
+                              className="accent-indigo-500"
+                            />
+                            <span>Top (F.Cu)</span>
+                          </label>
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input 
+                              type="checkbox"
+                              checked={!((activeClass as any).allowedLayers?.length) || (activeClass as any).allowedLayers.includes("B.Cu")}
+                              onChange={(e) => {
+                                const allowed: string[] = (activeClass as any).allowedLayers || ["F.Cu", "B.Cu"];
+                                const next = e.target.checked 
+                                  ? [...allowed, "B.Cu"] 
+                                  : allowed.filter(l => l !== "B.Cu");
+                                handleUpdateNetClass(selectedNetClassId, { allowedLayers: next.length ? next : ["B.Cu"] });
+                              }}
+                              className="accent-indigo-500"
+                            />
+                            <span>Bottom (B.Cu)</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Part B: NETS ASSOCIATION SECTION */}
+              <div className="space-y-2 border-b border-white/5 pb-4 max-h-48 flex flex-col min-h-0">
+                <span className="text-[9px] uppercase font-extrabold tracking-widest text-zinc-400 shrink-0">ASSIGN NETS TO CLASSES</span>
+                <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-0">
+                  {board.nets.map(net => {
+                    const activeClass = activeNetClasses.find(nc => nc.name === (net as any).netClass) || activeNetClasses.find(nc => nc.name === 'DEFAULT') || { id: 'nc-default', name: 'DEFAULT' };
+                    return (
+                      <div key={net.id} className="flex items-center justify-between gap-2 p-1.5 bg-[#141414]/60 border border-white/5 rounded-lg text-[9px]">
+                        <span className="font-bold text-white truncate max-w-[80px]" title={net.name}>{net.name}</span>
+                        <select
+                          value={activeClass.id}
+                          onChange={(e) => {
+                            const newClass = activeNetClasses.find(nc => nc.id === e.target.value);
+                            if (newClass) handleAssignNetClass(net.id, newClass.name);
+                          }}
+                          className="bg-[#1c1c1c] border border-white/10 rounded px-1.5 py-0.5 text-zinc-300 max-w-[124px] outline-none cursor-pointer"
+                        >
+                          {activeNetClasses.map(nc => (
+                            <option key={nc.id} value={nc.id}>{nc.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Part C: MATCHED DIFFERENTIAL PAIR GROUPS */}
+              <div className="space-y-2 flex flex-col flex-1 min-h-0">
+                <div className="flex items-center justify-between shrink-0">
+                  <span className="text-[9px] uppercase font-extrabold tracking-widest text-zinc-400">DIFFERENTIAL PAIRS</span>
+                  <button 
+                    onClick={() => setShowAddDpModal(true)}
+                    className="p-1 px-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 rounded cursor-pointer transition-all flex items-center justify-center"
+                  >
+                    <Plus size={10} />
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-0">
+                  {activeDiffPairs.length === 0 ? (
+                    <div className="text-[9px] text-zinc-600 italic py-2 leading-tight">No matched pair configuration found. Click (+) to group companion signals.</div>
+                  ) : (
+                    activeDiffPairs.map(dp => {
+                      const posNetName = board.nets.find(n => n.id === dp.positiveNetId)?.name || 'None';
+                      const negNetName = board.nets.find(n => n.id === dp.negativeNetId)?.name || 'None';
+                      return (
+                        <div key={dp.id} className="p-2 border border-white/5 bg-[#111] rounded-xl relative group">
+                          <div className="flex justify-between items-center border-b border-white/5 pb-1 mb-1.5">
+                            <span className="font-extrabold text-[#10b981] text-[10px] uppercase tracking-wider">{dp.name}</span>
+                            <button
+                              onClick={() => handleDeleteDiffPair(dp.id)}
+                              className="text-zinc-650 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                              <Trash2 size={10} />
+                            </button>
+                          </div>
+                          <div className="space-y-1 text-[8px] text-zinc-400">
+                            <div className="flex justify-between">
+                              <span>P+ SIGNAL:</span>
+                              <span className="text-white font-bold">{posNetName}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>N- SIGNAL:</span>
+                              <span className="text-white font-bold">{negNetName}</span>
+                            </div>
+                            <div className="flex justify-between border-t border-white/5 pt-1 mt-1 font-bold text-zinc-500">
+                              <span>W / S Target:</span>
+                              <span className="text-[#10b981]">{dp.width} / {dp.spacing} mm</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>Skew Tolerance:</span>
+                              <span className="text-amber-400">±{dp.skewTolerance} mm</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+            </div>
+          )}
         </aside>
       )}
       {showThreeD && (
@@ -1640,6 +2135,101 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
              <div className="border-t border-white/5 pt-4 text-center">
                 <p className="text-[9px] text-gray-600 font-mono">All files are generated strictly on client side according to industry-standard specifications.</p>
              </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: ADD NET CLASS */}
+      {showAddClassModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4 backdrop-blur-md">
+          <div className="bg-[#0b0b0f] border border-white/10 rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-6 text-gray-200 font-mono text-xs">
+            <h3 className="text-sm font-black uppercase tracking-wider text-white border-b border-white/5 pb-3 mb-4">Add Custom Net Class</h3>
+            <div className="space-y-4">
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[9px] text-zinc-400 font-extrabold uppercase">class name (e.g. CLOCK, HIGH_POWER)</span>
+                <input 
+                  type="text"
+                  placeholder="POWER_CLASS"
+                  value={newClassName}
+                  onChange={(e) => setNewClassName(e.target.value)}
+                  className="bg-[#141419] text-white border border-white/10 rounded-xl p-2.5 outline-none font-bold placeholder:text-zinc-700"
+                />
+              </div>
+              <div className="flex gap-2 pt-2 justify-end">
+                <button 
+                  onClick={() => { setShowAddClassModal(false); setNewClassName(""); }}
+                  className="px-4 py-2 hover:bg-white/5 border border-white/5 text-zinc-400 rounded-xl uppercase font-extrabold text-[10px] tracking-widest cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={() => handleAddNetClass(newClassName)}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-550 text-white rounded-xl uppercase font-extrabold text-[10px] tracking-widest cursor-pointer"
+                >
+                  Create Class
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: REGISTER DIFFERENTIAL PAIR */}
+      {showAddDpModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4 backdrop-blur-md">
+          <div className="bg-[#0b0b0f] border border-white/10 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl p-6 text-gray-200 font-mono text-xs">
+            <h3 className="text-sm font-black uppercase tracking-wider text-white border-b border-white/5 pb-3 mb-4">Register Differential Pair</h3>
+            <div className="space-y-4">
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[9px] text-zinc-400 font-extrabold uppercase">PAIR NAME (e.g. HS_USB, HDMI0_D0)</span>
+                <input 
+                  type="text"
+                  placeholder="USB_D"
+                  value={newDpName}
+                  onChange={(e) => setNewDpName(e.target.value)}
+                  className="bg-[#141419] text-white border border-white/10 rounded-xl p-2.5 outline-none font-bold placeholder:text-zinc-700"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[9px] text-zinc-400 font-extrabold uppercase">POSITIVE ARM NET (+)</span>
+                <select 
+                  value={newDpPosNet}
+                  onChange={(e) => setNewDpPosNet(e.target.value)}
+                  className="bg-[#141419] border border-white/10 rounded-xl p-2.5 text-white font-mono text-xs outline-none cursor-pointer"
+                >
+                  <option value="">-- Select Net --</option>
+                  {board.nets.map(n => <option key={n.id} value={n.id}>{n.name}</option>)}
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[9px] text-zinc-400 font-extrabold uppercase">NEGATIVE ARM NET (-)</span>
+                <select 
+                  value={newDpNegNet}
+                  onChange={(e) => setNewDpNegNet(e.target.value)}
+                  className="bg-[#141419] border border-white/10 rounded-xl p-2.5 text-white font-mono text-xs outline-none cursor-pointer"
+                >
+                  <option value="">-- Select Net --</option>
+                  {board.nets.map(n => <option key={n.id} value={n.id}>{n.name}</option>)}
+                </select>
+              </div>
+
+              <div className="flex gap-2 pt-2 justify-end">
+                <button 
+                  onClick={() => { setShowAddDpModal(false); setNewDpName(""); setNewDpPosNet(""); setNewDpNegNet(""); }}
+                  className="px-4 py-2 hover:bg-white/5 border border-white/5 text-zinc-400 rounded-xl uppercase font-extrabold text-[10px] tracking-widest cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleCreateDiffPair}
+                  className="px-4 py-2 bg-[#10b981] hover:bg-[#059669] text-white rounded-xl uppercase font-extrabold text-[10px] tracking-widest cursor-pointer"
+                >
+                  Register pair
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
