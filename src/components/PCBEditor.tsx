@@ -19,6 +19,9 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '@/src/lib/utils';
 import { ProjectGraph } from '../types';
 import { syncBoardFromGraph } from '../lib/board';
+import { useProjectStore } from '../lib/core/store';
+import { MultiplayerCursors } from './MultiplayerCursors';
+import { Users } from 'lucide-react';
 import { runDRC, DRCViolation } from '../lib/drc';
 import { ConstraintDrivenRoutingSystem } from '../lib/routingSystem';
 import { resolveNetConstraints, DefaultNetClasses } from '../lib/constraints';
@@ -282,6 +285,11 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
   const isInteractive = mode === 'live';
   const isReadOnly = mode !== 'live';
 
+  // Multiplayer collaborative hooks
+  const presences = useProjectStore(state => state.presences);
+  const activeLocks = useProjectStore(state => state.activeLocks);
+  const broadcastPresenceCursor = useProjectStore(state => state.broadcastPresenceCursor);
+
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const isPanning = useRef(false);
@@ -357,6 +365,29 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
   const [routingLogs, setRoutingLogs] = useState<string[]>([]);
   const [showRoutingModal, setShowRoutingModal] = useState(false);
   const [routingStats, setRoutingStats] = useState({ routed: 0, failed: 0 });
+
+  const [isOptimizing, setIsOptimizing] = useState(false);
+  const runOptimization = useProjectStore(state => state.runOptimizationPass);
+
+  const handleRunOptimizer = useCallback(() => {
+    if (isReadOnly) return;
+    setIsOptimizing(true);
+    showToast("INFO: Initiating thermal/EMI/DRC physical layout optimizer pass...");
+    setTimeout(() => {
+      try {
+        const res = runOptimization();
+        if (res.success) {
+          showToast(`SUCCESS: Layout optimized! Score improved from ${res.initialScore} to ${res.optimizedScore}`);
+        } else {
+          showToast(`INFO: Active PCB placement matches deterministic constraints.`);
+        }
+      } catch (err: any) {
+        showToast(`ERROR: Layout optimization failed. ${err.message}`);
+      } finally {
+        setIsOptimizing(false);
+      }
+    }, 800);
+  }, [isReadOnly, runOptimization, showToast]);
 
   const intervalRef = useRef<any>(null);
   const timeoutRef = useRef<any>(null);
@@ -1758,6 +1789,15 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
                     >
                         <svg className={isAutoRouting ? "animate-spin text-indigo-400 w-3.5 h-3.5" : "text-indigo-400 w-3.5 h-3.5"} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 5l4 4"/><path d="M21 5l-4 4"/><path d="M5 19l4-4"/><path d="M21 19l-4-4"/><circle cx="12" cy="12" r="3"/></svg>
                         {isReadOnly ? `${mode === 'replay' ? 'Replay' : 'Inspect'} Mode (Read)` : isAutoRouting ? `Auto-Routing...` : "A* Auto-Route Nets"}
+                    </button>
+
+                    <button 
+                      onClick={handleRunOptimizer}
+                      disabled={isOptimizing || isReadOnly}
+                      className="w-full py-2 bg-indigo-600/10 hover:bg-indigo-600/20 border border-indigo-500/30 text-indigo-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer animate-pulse"
+                    >
+                        <Activity size={14} className={isOptimizing ? "animate-spin" : ""} />
+                        {isReadOnly ? `${mode === 'replay' ? 'Replay' : 'Inspect'} Mode (Read)` : isOptimizing ? `Optimizing...` : "Optimize Board Layout"}
                     </button>
 
                     <button 

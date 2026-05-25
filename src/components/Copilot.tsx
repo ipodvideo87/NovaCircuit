@@ -9,11 +9,14 @@ import {
   Bot,
   User,
   MoreHorizontal,
-  ShieldCheck
+  ShieldCheck,
+  AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '@/src/lib/utils';
 import { ProjectGraph, AIAction } from '../types';
+import { ProjectGraphModel } from '../lib/core/graph';
+import { validateAndApplyActions } from '../lib/actionValidation';
 
 interface Message {
   role: 'assistant' | 'user';
@@ -21,6 +24,7 @@ interface Message {
   timestamp: Date;
   tasks?: string[];
   reasoning?: string;
+  validationErrors?: string[];
 }
 
 interface FluxCopilotProps {
@@ -68,12 +72,21 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
     setCurrentTask('Analyzing requirements...');
 
     try {
+      // Compile the project state into a semantic text digest
+      let stateContext = "";
+      if (projectStateRef.current) {
+        const model = new ProjectGraphModel(projectStateRef.current);
+        stateContext = `\n\nCURRENT PROJECT GRAPH STATE:\n${model.getSemanticDigestForAI()}`;
+      }
+
       const response = await fetch("/api/copilot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
           messages: newMessages,
-          projectState: projectStateRef.current
+          // We still send standard json to prevent breaking backend endpoints, but append the helper context for rich intelligence
+          projectState: projectStateRef.current,
+          stateSummary: stateContext
         })
       });
 
@@ -98,28 +111,32 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
         args: a.params || a.args
       })) : [];
 
-      if (mappedActions.length > 0) {
-        setCurrentTask(`Executing ${mappedActions.length} hardware operations...`);
-        await new Promise(r => setTimeout(r, 800)); // Simulate task execution
+      let validationErrors: string[] = [];
+      if (mappedActions.length > 0 && projectStateRef.current) {
+        setCurrentTask(`Dry-running transaction safety checks on ${mappedActions.length} actions...`);
+        const validation = validateAndApplyActions(mappedActions, projectStateRef.current);
+        validationErrors = validation.errors;
+        await new Promise(r => setTimeout(r, 600)); // Smooth UX transition
       }
 
       let errorText = "";
-      if (data.errors && data.errors.length > 0) {
-        errorText = `\n\n[WARNING] Action Validation Errors:\n` + data.errors.map((e: string) => `- ${e}`).join('\n');
+      if (validationErrors.length > 0) {
+        errorText = `\n\n[DRY RUN FAILURE] Action Validation Blocked:\n` + validationErrors.map((e: string) => `• ${e}`).join('\n');
       }
 
       const assistantMessage: Message = {
         role: 'assistant',
-        content: (content || "Operations complete.") + errorText,
+        content: (content || "Operations checked.") + errorText,
         reasoning,
         tasks: mappedActions.map((a: any) => a.name),
+        validationErrors,
         timestamp: new Date()
       };
 
       setMessages(prev => [...prev, assistantMessage]);
 
-      if (mappedActions.length > 0 && onAiAction) {
-        console.log("=== CALLING onAiAction WITH ===", JSON.stringify(data.actions, null, 2));
+      if (mappedActions.length > 0 && onAiAction && validationErrors.length === 0) {
+        console.log("=== COMMITTING ACTIONS ===", JSON.stringify(mappedActions, null, 2));
         onAiAction(mappedActions, content);
       }
     } catch (error) {
@@ -157,9 +174,9 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
         <div className="flex items-center gap-3">
            <div className="text-right hidden sm:block">
               <div className="text-[8px] text-gray-500 uppercase font-bold tracking-widest">Uptime</div>
-              <div className="text-[10px] text-white tabular-nums">99.98%</div>
-           </div>
-        </div>
+               <div className="text-[10px] text-white tabular-nums">99.98%</div>
+            </div>
+         </div>
       </div>
 
       {/* Chat / Terminal Area */}
@@ -193,17 +210,29 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
                 </div>
               )}
 
-              <div className="font-sans">
+              <div className="font-sans whitespace-pre-wrap">
                 {m.content}
               </div>
 
-              {m.tasks && m.tasks.length > 0 && (
+              {m.validationErrors && m.validationErrors.length > 0 && (
+                <div className="mt-4 p-3 bg-rose-500/5 border border-rose-500/15 rounded-md space-y-1.5">
+                  <div className="text-[9px] text-rose-400 uppercase font-black tracking-widest flex items-center gap-1.5">
+                    <AlertTriangle size={12} />
+                    Transaction Rejected by Validator
+                  </div>
+                  <div className="text-[11px] text-rose-300/80 font-mono leading-tight">
+                    This modification violates electrical clearances, contains overlapping designators, or targets missing copper pins. Actions dropped.
+                  </div>
+                </div>
+              )}
+
+              {m.tasks && m.tasks.length > 0 && (!m.validationErrors || m.validationErrors.length === 0) && (
                 <div className="mt-4 pt-4 border-t border-white/5 space-y-2">
-                   <div className="text-[9px] text-gray-600 uppercase font-black tracking-widest mb-2">Operations Executed</div>
+                   <div className="text-[9px] text-gray-600 uppercase font-black tracking-widest mb-2">Connected Operations</div>
                    {m.tasks.map((task, idx) => (
                      <div key={idx} className="flex items-center gap-2 text-[11px] text-emerald-400/80">
                         <ShieldCheck size={12} />
-                        <span className="font-mono">CALL::{task.toUpperCase()}</span>
+                        <span className="font-mono">TRANSACTION::COMMIT::{task.toUpperCase()}</span>
                      </div>
                    ))}
                 </div>
@@ -215,18 +244,18 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
         {isTyping && (
            <div className="space-y-3">
              <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-indigo-400">
-               <Bot size={12} />
-               Flux.Agent
-               <motion.span 
-                 animate={{ opacity: [1, 0, 1] }} 
-                 className="ml-2 w-1.5 h-1.5 bg-indigo-500 rounded-full shadow-[0_0_5px_rgba(79,70,229,1)]"
-               />
+                <Bot size={12} />
+                Flux.Agent
+                <motion.span 
+                  animate={{ opacity: [1, 0, 1] }} 
+                  className="ml-2 w-1.5 h-1.5 bg-indigo-500 rounded-full shadow-[0_0_5px_rgba(79,70,229,1)]"
+                />
              </div>
              <div className="p-4 bg-white/[0.02] border border-white/5 rounded-lg">
                 <div className="flex flex-col gap-3">
                    <div className="flex items-center gap-2 text-[11px] text-gray-500 font-mono">
                       <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 2, ease: "linear" }}>
-                        <Zap size={12} className="text-warning-500" />
+                        <Zap size={12} className="text-amber-500" />
                       </motion.div>
                       {currentTask || "Processing project graph..."}
                    </div>
@@ -292,5 +321,5 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
     </div>
   );
 }, (prev, next) => {
-  return prev.onAiAction === next.onAiAction;
+  return prev.onAiAction === next.onAiAction && prev.projectState === next.projectState;
 });

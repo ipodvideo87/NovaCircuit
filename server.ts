@@ -102,6 +102,17 @@ app.post("/api/copilot", async (req, res) => {
 });
 
 // Vite middleware for development
+import { WebSocketServer, WebSocket } from "ws";
+
+interface MultiplayerClient {
+  ws: WebSocket;
+  userId: string;
+  userName: string;
+  room: string;
+}
+
+const activeRooms = new Map<string, MultiplayerClient[]>();
+
 async function setupVite() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -117,8 +128,84 @@ async function setupVite() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+  });
+
+  // Mount real-time engineering high-frequency multi-user orchestration pipeline
+  const wss = new WebSocketServer({ server });
+
+  wss.on("connection", (ws) => {
+    let clientRoom = "global-default";
+    let clientUserId = `user_${Math.floor(Math.random() * 100000)}`;
+    let clientUserName = "Anonymous Designer";
+
+    ws.on("message", (rawMessage) => {
+      try {
+        const payload = JSON.parse(rawMessage.toString());
+        const { type, room, userId, userName } = payload;
+
+        if (room) clientRoom = room;
+        if (userId) clientUserId = userId;
+        if (userName) clientUserName = userName;
+
+        if (type === "join") {
+          let roomClients = activeRooms.get(clientRoom) || [];
+          // Avoid duplicate join entries
+          roomClients = roomClients.filter(c => c.userId !== clientUserId);
+          roomClients.push({ ws, userId: clientUserId, userName: clientUserName, room: clientRoom });
+          activeRooms.set(clientRoom, roomClients);
+
+          // Broadcast Join Notification to fellow peers in the room
+          const joinNotification = JSON.stringify({
+            type: "presence_joined",
+            userId: clientUserId,
+            userName: clientUserName,
+            timestamp: Date.now()
+          });
+          roomClients.forEach(client => {
+            if (client.userId !== clientUserId && client.ws.readyState === WebSocket.OPEN) {
+              client.ws.send(joinNotification);
+            }
+          });
+        } 
+
+        else if (type === "delta" || type === "presence" || type === "lock" || type === "heartbeat") {
+          const roomClients = activeRooms.get(clientRoom);
+          if (roomClients) {
+            const broadcastPayload = JSON.stringify(payload);
+            roomClients.forEach(client => {
+              if (client.userId !== clientUserId && client.ws.readyState === WebSocket.OPEN) {
+                client.ws.send(broadcastPayload);
+              }
+            });
+          }
+        }
+      } catch (err) {
+        // Safe fail-silent for high-speed invalid JSON telemetry
+      }
+    });
+
+    ws.on("close", () => {
+      let roomClients = activeRooms.get(clientRoom);
+      if (roomClients) {
+        roomClients = roomClients.filter(c => c.ws !== ws);
+        activeRooms.set(clientRoom, roomClients);
+
+        // Broadcast Departure
+        const leaveNotification = JSON.stringify({
+          type: "presence_left",
+          userId: clientUserId,
+          userName: clientUserName,
+          timestamp: Date.now()
+        });
+        roomClients.forEach(client => {
+          if (client.ws.readyState === WebSocket.OPEN) {
+            client.ws.send(leaveNotification);
+          }
+        });
+      }
+    });
   });
 }
 

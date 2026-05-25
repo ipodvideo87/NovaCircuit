@@ -75,6 +75,9 @@ import { ProjectGraph, AIAction, PCBComponent, PinDef } from '../types';
 
 import { validateAndApplyActions } from '../lib/actionValidation';
 import { useTransactionManager, deepCloneGraph } from '../lib/transaction';
+import { useProjectStore } from '../lib/core/store';
+import { MultiplayerCursors } from './MultiplayerCursors';
+import { Users, Wifi, WifiOff } from 'lucide-react';
 import { runSystemRegressionSuite } from '../lib/testHarness';
 import { runERC, ERCIssue } from '../lib/erc';
 import { resolveNetDrivers, NetDriverReport } from '../lib/netDriver';
@@ -924,6 +927,39 @@ export default function SchematicEditor() {
   }, [isRestored, clearRestoredFlag]);
 
   const activeGraph = replayGraph ?? transientActiveGraph;
+
+  // Synchronize local active graph with central Zustand store
+  const setStoreGraph = useProjectStore(state => state.setGraph);
+  useEffect(() => {
+    setStoreGraph(activeGraph);
+  }, [activeGraph, setStoreGraph]);
+
+  // Synchronize incoming remote peer edits into the local transaction manager
+  const storeGraph = useProjectStore(state => state.graph);
+  useEffect(() => {
+    const activeStr = JSON.stringify(transientActiveGraph);
+    const storeStr = JSON.stringify(storeGraph);
+    if (activeStr !== storeStr) {
+      commitTransaction(storeGraph);
+    }
+  }, [storeGraph, transientActiveGraph, commitTransaction]);
+
+  // Collaborative Multiplayer State & Setup Hook
+  const isConnected = useProjectStore(state => state.isConnected);
+  const presences = useProjectStore(state => state.presences);
+  const activeLocks = useProjectStore(state => state.activeLocks);
+  const joinRoom = useProjectStore(state => state.joinRoom);
+  const disconnectMultiplayer = useProjectStore(state => state.disconnectMultiplayer);
+  const broadcastPresenceCursor = useProjectStore(state => state.broadcastPresenceCursor);
+
+  const [multiplayerRoom, setMultiplayerRoom] = useState("flux-main-sandbox");
+  const [multiplayerUserName, setMultiplayerUserName] = useState(() => `Designer_${Math.floor(Math.random() * 90) + 10}`);
+  const [showMultiplayerModal, setShowMultiplayerModal] = useState(false);
+
+  useEffect(() => {
+    // Standard initial room-joining out of the box
+    joinRoom(multiplayerRoom, multiplayerUserName);
+  }, []);
 
   const selectedIdsStr = useMemo(() => {
     if (view !== 'pcb') return '';
@@ -2593,6 +2629,78 @@ export default function SchematicEditor() {
 
           {/* View Container */}
           <div className="flex-1 w-full bg-[#050505] relative overflow-hidden">
+            {/* Multiplayer Peer Status Control Widget */}
+            {!isMobile && (
+              <div className="absolute top-4 right-52 bg-[#0d0d0d]/90 backdrop-blur border border-white/10 rounded-xl p-1 flex items-center shadow-2xl z-30 font-sans">
+                <button
+                  onClick={() => setShowMultiplayerModal(true)}
+                  className="flex items-center gap-2 p-1.5 px-3 text-[9px] md:text-[10px] font-black text-gray-300 hover:text-white uppercase tracking-widest cursor-pointer transition-all"
+                >
+                  <span className={cn(
+                    "w-1.5 h-1.5 rounded-full",
+                    isConnected ? "bg-emerald-500 animate-pulse" : "bg-rose-500"
+                  )} />
+                  <Users size={12} className="text-zinc-500" />
+                  <span>{presences.length + 1} Studio Users</span>
+                </button>
+              </div>
+            )}
+
+            {/* Multiplayer Configuration Modal */}
+            {showMultiplayerModal && (
+              <div className="absolute inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+                <div className="bg-[#0b0b0b] border border-white/10 rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl relative">
+                  <button 
+                    onClick={() => setShowMultiplayerModal(false)} 
+                    className="absolute top-4 right-4 text-zinc-500 hover:text-white text-xs cursor-pointer p-1"
+                  >
+                    ✕
+                  </button>
+                  <div className="text-xs font-black text-white uppercase tracking-wider flex items-center gap-2">
+                    <span className={cn(
+                      "w-1.5 h-1.5 rounded-full",
+                      isConnected ? "bg-emerald-500 animate-pulse" : "bg-rose-500"
+                    )} />
+                    Multiplayer Studio Session
+                  </div>
+                  <div className="text-[10px] text-zinc-400 font-medium leading-relaxed">
+                    Collaborate with hardware designers in real time. Share this workspace ID or choose an active room to sync layout updates.
+                  </div>
+                  <div className="space-y-3 pt-2">
+                    <div>
+                      <label className="block text-[8px] text-zinc-500 font-extrabold uppercase tracking-widest mb-1">Room Connection ID</label>
+                      <input
+                        type="text"
+                        value={multiplayerRoom}
+                        onChange={(e) => setMultiplayerRoom(e.target.value)}
+                        className="w-full bg-[#111] border border-white/10 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-indigo-500"
+                        placeholder="Enter room identity to join"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[8px] text-zinc-500 font-extrabold uppercase tracking-widest mb-1">Your callsgn (Alias)</label>
+                      <input
+                        type="text"
+                        value={multiplayerUserName}
+                        onChange={(e) => setMultiplayerUserName(e.target.value)}
+                        className="w-full bg-[#111] border border-white/10 rounded-xl px-3 py-2 text-xs font-semibold text-white focus:outline-none focus:border-indigo-500"
+                        placeholder="Designer Nickname"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      joinRoom(multiplayerRoom, multiplayerUserName);
+                      setShowMultiplayerModal(false);
+                    }}
+                    className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all cursor-pointer"
+                  >
+                    Connect Studio Room
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* View Switcher Panel (Visible across all views on Desktop, hidden on Mobile in favor of bottom nav tabs) */}
             {!isMobile && (
               <div className="absolute top-4 right-4 bg-[#0d0d0d]/90 backdrop-blur border border-white/10 rounded-xl p-1 flex gap-1 shadow-2xl z-30 font-sans">
@@ -2619,7 +2727,13 @@ export default function SchematicEditor() {
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  className="w-full h-full"
+                  className="w-full h-full relative"
+                  onMouseMove={(e) => {
+                    const bounds = e.currentTarget.getBoundingClientRect();
+                    const x = e.clientX - bounds.left;
+                    const y = e.clientY - bounds.top;
+                    broadcastPresenceCursor(x, y);
+                  }}
                 >
                     <ReactFlow
                     onInit={(instance) => { flowInstanceRef.current = instance; }}
@@ -2654,6 +2768,8 @@ export default function SchematicEditor() {
                       </Panel>
                     )}
                   </ReactFlow>
+
+                  <MultiplayerCursors presences={presences} activeLocks={activeLocks} />
 
                   {/* Speed Stamp Belt (Palette of Recent / Favorite Components) */}
                   {isMobile && view === 'schematic' && !isReadOnly && (

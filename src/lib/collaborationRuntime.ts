@@ -419,3 +419,253 @@ export class MergeApprovalPipeline {
     }
   }
 }
+
+/**
+ * 6. High-Performance Browser-Native Multiplayer WebSocket Client
+ */
+export class MultiplayerCollaborationClient {
+  private socket: WebSocket | null = null;
+  private room: string;
+  private userId: string;
+  private userName: string;
+  private role: UserRole;
+  private reconnectAttempts = 0;
+  private isConnecting = false;
+  private offlineQueue: { type: string; payload: any }[] = [];
+  private vectorClock: Record<string, number> = {};
+
+  // Active in-memory caches
+  private remoteUsers: Map<string, UserPresence> = new Map();
+  private activeLocks: Map<string, string> = new Map();
+
+  // Callbacks
+  private onConnectionStateChange?: (connected: boolean) => void;
+  private onPresenceUpdate?: (users: UserPresence[]) => void;
+  private onDeltaReceive?: (type: string, payload: any) => void;
+  private onLocksUpdate?: (locks: Record<string, string>) => void;
+
+  constructor(
+    room: string,
+    userId: string,
+    userName: string,
+    role: UserRole = "Editor"
+  ) {
+    this.room = room;
+    this.userId = userId;
+    this.userName = userName;
+    this.role = role;
+    this.vectorClock[userId] = 0;
+  }
+
+  public connect(
+    callbacks: {
+      onConnectionStateChange?: (connected: boolean) => void;
+      onPresenceUpdate?: (users: UserPresence[]) => void;
+      onDeltaReceive?: (type: string, payload: any) => void;
+      onLocksUpdate?: (locks: Record<string, string>) => void;
+    }
+  ) {
+    this.onConnectionStateChange = callbacks.onConnectionStateChange;
+    this.onPresenceUpdate = callbacks.onPresenceUpdate;
+    this.onDeltaReceive = callbacks.onDeltaReceive;
+    this.onLocksUpdate = callbacks.onLocksUpdate;
+
+    if (this.socket || this.isConnecting) return;
+    this.isConnecting = true;
+
+    // Resolve protocol based on current browser environment
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = window.location.host;
+    const wsUrl = `${protocol}//${host}`;
+
+    try {
+      this.socket = new WebSocket(wsUrl);
+
+      this.socket.onopen = () => {
+        this.isConnecting = false;
+        this.reconnectAttempts = 0;
+        this.onConnectionStateChange?.(true);
+
+        // Instantly authenticate & subscribe to room
+        this.sendRaw({
+          type: "join",
+          room: this.room,
+          userId: this.userId,
+          userName: this.userName
+        });
+
+        // Flush offline modifications queue
+        this.flushOfflineQueue();
+
+        // Broadcast initial presence
+        this.broadcastPresence({ x: 0, y: 0 }, []);
+      };
+
+      this.socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          this.handleIncomingSocketMessage(data);
+        } catch (e) {
+          // Safe fail-silent for non-standard RPCs
+        }
+      };
+
+      this.socket.onclose = () => {
+        this.handleDisconnect();
+      };
+
+      this.socket.onerror = () => {
+        this.socket?.close();
+      };
+    } catch (err) {
+      this.handleDisconnect();
+    }
+  }
+
+  private handleDisconnect() {
+    this.socket = null;
+    this.isConnecting = false;
+    this.onConnectionStateChange?.(false);
+
+    // Progressive exponential backoff strategy
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 16000);
+    this.reconnectAttempts++;
+
+    setTimeout(() => {
+      this.connect({
+        onConnectionStateChange: this.onConnectionStateChange,
+        onPresenceUpdate: this.onPresenceUpdate,
+        onDeltaReceive: this.onDeltaReceive,
+        onLocksUpdate: this.onLocksUpdate
+      });
+    }, delay);
+  }
+
+  private handleIncomingSocketMessage(msg: any) {
+    if (!msg || typeof msg !== "object") return;
+
+    if (msg.type === "presence_joined") {
+      // Create user presence shell
+      const presence: UserPresence = {
+        userId: msg.userId,
+        userName: msg.userName || "Co-designer",
+        role: "Editor",
+        lastActiveTimestamp: Date.now(),
+        activeSelectionIds: []
+      };
+      this.remoteUsers.set(msg.userId, presence);
+      this.onPresenceUpdate?.(Array.from(this.remoteUsers.values()));
+    } 
+
+    else if (msg.type === "presence_left") {
+      this.remoteUsers.delete(msg.userId);
+      this.onPresenceUpdate?.(Array.from(this.remoteUsers.values()));
+    } 
+
+    else if (msg.type === "presence") {
+      if (msg.userId === this.userId) return; // Skip echo reflections
+      const presence: UserPresence = {
+        userId: msg.userId,
+        userName: msg.userName,
+        role: msg.role || "Editor",
+        cursorPosition: msg.cursorPosition,
+        activeSelectionIds: msg.activeSelectionIds || [],
+        lastActiveTimestamp: Date.now()
+      };
+      this.remoteUsers.set(msg.userId, presence);
+      this.onPresenceUpdate?.(Array.from(this.remoteUsers.values()));
+    } 
+
+    else if (msg.type === "delta") {
+      if (msg.userId === this.userId) return;
+      // Increment other peers vector clocks
+      const peerId = msg.userId;
+      this.vectorClock[peerId] = Math.max(this.vectorClock[peerId] || 0, msg.sequence || 0);
+
+      this.onDeltaReceive?.(msg.subType, msg.payload);
+    } 
+
+    else if (msg.type === "lock") {
+      if (msg.userId === this.userId) return;
+      if (msg.status === "acquired") {
+        this.activeLocks.set(msg.targetId, msg.userId);
+      } else {
+        this.activeLocks.delete(msg.targetId);
+      }
+      this.onLocksUpdate?.(Object.fromEntries(this.activeLocks.entries()));
+    }
+  }
+
+  public broadcastPresence(
+    cursor: { x: number; y: number; sheetId?: string } | undefined,
+    selections: string[]
+  ) {
+    this.sendRaw({
+      type: "presence",
+      room: this.room,
+      userId: this.userId,
+      userName: this.userName,
+      role: this.role,
+      cursorPosition: cursor,
+      activeSelectionIds: selections
+    });
+  }
+
+  public broadcastDelta(subType: string, payload: any) {
+    this.vectorClock[this.userId] = (this.vectorClock[this.userId] || 0) + 1;
+
+    const data = {
+      type: "delta",
+      subType,
+      room: this.room,
+      userId: this.userId,
+      sequence: this.vectorClock[this.userId],
+      timestamp: Date.now(),
+      payload
+    };
+
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.sendRaw(data);
+    } else {
+      this.offlineQueue.push({ type: "delta", payload: data });
+    }
+  }
+
+  public acquireElementLock(elementId: string) {
+    this.sendRaw({
+      type: "lock",
+      status: "acquired",
+      room: this.room,
+      userId: this.userId,
+      targetId: elementId
+    });
+  }
+
+  public releaseElementLock(elementId: string) {
+    this.sendRaw({
+      type: "lock",
+      status: "released",
+      room: this.room,
+      userId: this.userId,
+      targetId: elementId
+    });
+  }
+
+  private sendRaw(data: any) {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(data));
+    }
+  }
+
+  private flushOfflineQueue() {
+    while (this.offlineQueue.length > 0) {
+      const { payload } = this.offlineQueue.shift()!;
+      this.sendRaw(payload);
+    }
+  }
+
+  public disconnect() {
+    this.socket?.close();
+    this.socket = null;
+  }
+}
