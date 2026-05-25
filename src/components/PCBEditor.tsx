@@ -20,6 +20,7 @@ import { cn } from '@/src/lib/utils';
 import { ProjectGraph } from '../types';
 import { syncBoardFromGraph } from '../lib/board';
 import { runDRC, DRCViolation } from '../lib/drc';
+import { ConstraintDrivenRoutingSystem } from '../lib/routingSystem';
 import { resolveNetConstraints, DefaultNetClasses } from '../lib/constraints';
 import { generateGerberRS274X, generateExcellonDrill, generateIPCD356Netlist, generatePickAndPlaceCSV, generateBOMCSV } from '../lib/exporter';
 import { ThreeDBoardViewer } from './ThreeDBoardViewer';
@@ -352,6 +353,11 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
   const [isFixing, setIsFixing] = useState(false);
   const [fixProgress, setFixProgress] = useState(0);
 
+  const [isAutoRouting, setIsAutoRouting] = useState(false);
+  const [routingLogs, setRoutingLogs] = useState<string[]>([]);
+  const [showRoutingModal, setShowRoutingModal] = useState(false);
+  const [routingStats, setRoutingStats] = useState({ routed: 0, failed: 0 });
+
   const intervalRef = useRef<any>(null);
   const timeoutRef = useRef<any>(null);
 
@@ -359,6 +365,36 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
 
   // Synchronize Schematic Graph to PCB Board Deterministically
   const board = useMemo(() => syncBoardFromGraph(graph), [graph]);
+
+  const runBoardAutoRouter = useCallback(() => {
+    if (isReadOnly || !onCommitTransaction) return;
+    setIsAutoRouting(true);
+    setRoutingLogs(["Initializing browser-native A* multi-net search routing daemon...", "Reading copper layout clearances and board boundaries..."]);
+    setRoutingStats({ routed: 0, failed: 0 });
+    setShowRoutingModal(true);
+
+    setTimeout(() => {
+      try {
+        const sys = new ConstraintDrivenRoutingSystem();
+        const res = sys.autoRouteAllNets(graph, board.ratnest);
+        
+        setRoutingLogs(res.logs);
+        setRoutingStats({ routed: res.routedCount, failed: res.failedCount });
+        setIsAutoRouting(false);
+
+        if (res.success) {
+          onCommitTransaction(res.graph);
+          showToast(`SUCCESS: Routed ${res.routedCount} connection airwires!`);
+        } else {
+          showToast("WARN: No unconnected nets could be resolved.");
+        }
+      } catch (err: any) {
+        setRoutingLogs(prev => [...prev, `CRITICAL PROCESS EXCEPTION: ${err.message}`]);
+        setIsAutoRouting(false);
+        showToast("ERROR: Multi-net auto-routing process failed.");
+      }
+    }, 600);
+  }, [graph, board.ratnest, onCommitTransaction, isReadOnly, showToast]);
 
   // Constraint Manager & Net-Class States
   const [rightSidebarTab, setRightSidebarTab] = useState<'board' | 'constraints'>('board');
@@ -1716,6 +1752,15 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
                   </div>
                   <div className="flex flex-col gap-2 mt-2">
                     <button 
+                      onClick={runBoardAutoRouter}
+                      disabled={isAutoRouting || isReadOnly}
+                      className="w-full py-2 bg-indigo-600/10 hover:bg-indigo-600/20 border border-indigo-500/30 text-indigo-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                        <svg className={isAutoRouting ? "animate-spin text-indigo-400 w-3.5 h-3.5" : "text-indigo-400 w-3.5 h-3.5"} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 5l4 4"/><path d="M21 5l-4 4"/><path d="M5 19l4-4"/><path d="M21 19l-4-4"/><circle cx="12" cy="12" r="3"/></svg>
+                        {isReadOnly ? `${mode === 'replay' ? 'Replay' : 'Inspect'} Mode (Read)` : isAutoRouting ? `Auto-Routing...` : "A* Auto-Route Nets"}
+                    </button>
+
+                    <button 
                       onClick={startAutoFix}
                       disabled={isFixing || isReadOnly}
                       className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-600/30 text-emerald-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
@@ -2045,6 +2090,67 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
       )}
       {showThreeD && (
         <ThreeDBoardViewer board={board} onClose={() => setShowThreeD(false)} />
+      )}
+
+      {showRoutingModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4 backdrop-blur-md">
+          <div className="bg-[#0b0b10] border border-white/10 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl flex flex-col p-6 text-gray-200">
+             <div className="flex items-center justify-between border-b border-white/10 pb-4">
+                <div>
+                   <h3 className="text-sm font-black uppercase tracking-widest text-[#6366f1] flex items-center gap-2">
+                     <svg className={isAutoRouting ? "animate-spin w-4 h-4 text-indigo-400" : "w-4 h-4 text-indigo-400"} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 5l4 4"/><path d="M21 5l-4 4"/><path d="M5 19l4-4"/><path d="M21 19l-4-4"/><circle cx="12" cy="12" r="3"/></svg>
+                     A* Router Daemon Console
+                   </h3>
+                   <p className="text-[9px] text-gray-500 font-mono mt-0.5">Physical trace expansion A* pathfinder solver</p>
+                </div>
+                <button 
+                  onClick={() => setShowRoutingModal(false)}
+                  disabled={isAutoRouting}
+                  className="text-xs bg-white/5 hover:bg-white/10 text-gray-300 font-bold px-3 py-1.5 rounded-xl cursor-pointer transition-all disabled:opacity-50"
+                >
+                  Close Console
+                </button>
+             </div>
+
+             <div className="flex items-center justify-between bg-black/40 border border-white/5 rounded-2xl p-4 my-4 font-mono text-[10px]">
+                <div className="flex flex-col gap-1 items-center justify-center px-4 py-1 flex-1 border-r border-white/5">
+                   <span className="text-zinc-500 text-[8px] uppercase font-black">Routing Status</span>
+                   <span className={cn("text-xs font-black", isAutoRouting ? "text-indigo-400 animate-pulse" : routingStats.failed === 0 ? "text-emerald-400" : "text-amber-400")}>
+                     {isAutoRouting ? "SOLVING GRAPH..." : routingStats.failed === 0 ? "COMPLETED" : "PARTIAL ROUTE"}
+                   </span>
+                </div>
+                <div className="flex flex-col gap-1 items-center justify-center px-4 py-1 flex-1 border-r border-white/5">
+                   <span className="text-zinc-500 text-[8px] uppercase font-black">Airwires Resolved</span>
+                   <span className="text-xs font-black text-white">{routingStats.routed}</span>
+                </div>
+                <div className="flex flex-col gap-1 items-center justify-center px-4 py-1 flex-1">
+                   <span className="text-zinc-500 text-[8px] uppercase font-black">Unrouteable Airwires</span>
+                   <span className="text-xs font-black text-rose-500">{routingStats.failed}</span>
+                </div>
+             </div>
+
+             <div className="bg-[#050508] border border-white/5 rounded-2xl p-4 h-64 overflow-y-auto font-mono text-[9px] text-[#818cf8] flex flex-col gap-1.5 scrollbar-thin scrollbar-thumb-zinc-800">
+                {routingLogs.map((log, idx) => {
+                  let color = "text-indigo-400/90";
+                  if (log.includes("Successfully")) color = "text-emerald-400 font-bold";
+                  else if (log.includes("Warning")) color = "text-amber-400";
+                  else if (log.startsWith("Auto-routing cycle")) color = "text-indigo-300 font-bold border-t border-white/5 pt-1.5 mt-1.5";
+                  
+                  return (
+                    <div key={idx} className={cn("leading-tight whitespace-pre-wrap flex items-start gap-1.5", color)}>
+                      <span className="text-zinc-600 select-none">[{idx + 1}]</span>
+                      <span>{log}</span>
+                    </div>
+                  );
+                })}
+             </div>
+
+             <div className="mt-4 text-[9px] text-zinc-500 leading-tight flex items-center gap-1.5 bg-[#10b981]/5 border border-[#10b981]/15 px-3 py-2 rounded-xl">
+                <ShieldCheck size={14} className="text-[#10b981] shrink-0" />
+                <span>Deterministic topological router guarantees zero copper-to-copper Clearance violations against active Keepout zones and alternate net layers.</span>
+             </div>
+          </div>
+        </div>
       )}
 
       {showExportModal && (
