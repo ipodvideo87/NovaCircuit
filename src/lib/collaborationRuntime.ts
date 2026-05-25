@@ -13,6 +13,10 @@ export interface UserPresence {
   cursorPosition?: { x: number; y: number; sheetId?: string };
   activeSelectionIds: string[];
   lastActiveTimestamp: number;
+  activeTraceId?: string;
+  isAIProcessing?: boolean;
+  viewport?: { x: number; y: number; zoom: number };
+  selectionBox?: { startX: number; startY: number; endX: number; endY: number };
 }
 
 /**
@@ -420,6 +424,331 @@ export class MergeApprovalPipeline {
   }
 }
 
+import { deepCloneGraph } from './transaction';
+
+export interface TransactionOp {
+  type: 'upsert_component' | 'delete_component' | 'upsert_net' | 'delete_net' | 'upsert_trace' | 'delete_trace' | 'upsert_via' | 'delete_via' | 'upsert_keepout' | 'delete_keepout' | 'update_outline';
+  payload: any;
+}
+
+export interface DesignTransaction {
+  id: string;
+  senderId: string;
+  sequence: number;
+  timestamp: number;
+  operations: TransactionOp[];
+  vectorClock: Record<string, number>;
+}
+
+/**
+ * Computes deterministic differences between two ProjectGraph states.
+ */
+export function diffGraphs(oldG: ProjectGraph, newG: ProjectGraph): TransactionOp[] {
+  const ops: TransactionOp[] = [];
+
+  // 1. Components Diff
+  const oldComps = new Map((oldG.components || []).map(c => [c.id, c]));
+  const newComps = new Map((newG.components || []).map(c => [c.id, c]));
+
+  for (const [id, newC] of newComps.entries()) {
+    const oldC = oldComps.get(id);
+    if (!oldC || JSON.stringify(oldC) !== JSON.stringify(newC)) {
+      ops.push({
+        type: 'upsert_component',
+        payload: { component: newC }
+      });
+    }
+  }
+
+  for (const id of oldComps.keys()) {
+    if (!newComps.has(id)) {
+      ops.push({
+        type: 'delete_component',
+        payload: { id }
+      });
+    }
+  }
+
+  // 2. Nets Diff
+  const oldNets = new Map((oldG.nets || []).map(n => [n.id, n]));
+  const newNets = new Map((newG.nets || []).map(n => [n.id, n]));
+
+  for (const [id, newN] of newNets.entries()) {
+    const oldN = oldNets.get(id);
+    if (!oldN || JSON.stringify(oldN) !== JSON.stringify(newN)) {
+      ops.push({
+        type: 'upsert_net',
+        payload: { net: newN }
+      });
+    }
+  }
+
+  for (const id of oldNets.keys()) {
+    if (!newNets.has(id)) {
+      ops.push({
+        type: 'delete_net',
+        payload: { id }
+      });
+    }
+  }
+
+  // 3. Traces Diff
+  const oldTracesList = oldG.traces || [];
+  const newTracesList = newG.traces || [];
+  const oldTraces = new Map(oldTracesList.map(t => [t.id, t]));
+  const newTraces = new Map(newTracesList.map(t => [t.id, t]));
+
+  for (const [id, newT] of newTraces.entries()) {
+    const oldT = oldTraces.get(id);
+    if (!oldT || JSON.stringify(oldT) !== JSON.stringify(newT)) {
+      ops.push({
+        type: 'upsert_trace',
+        payload: { trace: newT }
+      });
+    }
+  }
+
+  for (const id of oldTraces.keys()) {
+    if (!newTraces.has(id)) {
+      ops.push({
+        type: 'delete_trace',
+        payload: { id }
+      });
+    }
+  }
+
+  // 4. Vias Diff
+  const oldViasList = oldG.vias || [];
+  const newViasList = newG.vias || [];
+  const oldVias = new Map(oldViasList.map(v => [v.id, v]));
+  const newVias = new Map(newViasList.map(v => [v.id, v]));
+
+  for (const [id, newV] of newVias.entries()) {
+    const oldV = oldVias.get(id);
+    if (!oldV || JSON.stringify(oldV) !== JSON.stringify(newV)) {
+      ops.push({
+        type: 'upsert_via',
+        payload: { via: newV }
+      });
+    }
+  }
+
+  for (const id of oldVias.keys()) {
+    if (!newVias.has(id)) {
+      ops.push({
+        type: 'delete_via',
+        payload: { id }
+      });
+    }
+  }
+
+  // 5. Keepouts Diff
+  const oldKList = oldG.keepouts || [];
+  const newKList = newG.keepouts || [];
+  const oldKs = new Map(oldKList.map(k => [k.id, k]));
+  const newKs = new Map(newKList.map(k => [k.id, k]));
+
+  for (const [id, newK] of newKs.entries()) {
+    const oldK = oldKs.get(id);
+    if (!oldK || JSON.stringify(oldK) !== JSON.stringify(newK)) {
+      ops.push({
+        type: 'upsert_keepout',
+        payload: { keepout: newK }
+      });
+    }
+  }
+
+  for (const id of oldKs.keys()) {
+    if (!newKs.has(id)) {
+      ops.push({
+        type: 'delete_keepout',
+        payload: { id }
+      });
+    }
+  }
+
+  // 6. Outline Diff
+  if (JSON.stringify(oldG.outline) !== JSON.stringify(newG.outline)) {
+    ops.push({
+      type: 'update_outline',
+      payload: { outline: newG.outline }
+    });
+  }
+
+  return ops;
+}
+
+/**
+ * Replays atomic differential transactions onto a ProjectGraph state deterministically.
+ */
+export function applyTransactionToGraph(graph: ProjectGraph, tx: DesignTransaction): ProjectGraph {
+  const cloned = deepCloneGraph(graph);
+
+  for (const op of tx.operations) {
+    switch (op.type) {
+      case 'upsert_component': {
+        const component = op.payload.component;
+        const existsIdx = cloned.components.findIndex(c => c.id === component.id);
+        if (existsIdx !== -1) {
+          cloned.components[existsIdx] = component;
+        } else {
+          cloned.components.push(component);
+        }
+        break;
+      }
+      case 'delete_component': {
+        const id = op.payload.id;
+        cloned.components = cloned.components.filter(c => c.id !== id);
+        cloned.nets = cloned.nets.filter(n => !n.connections.some(conn => conn.componentId === id));
+        break;
+      }
+      case 'upsert_net': {
+        const net = op.payload.net;
+        const existsIdx = cloned.nets.findIndex(n => n.id === net.id);
+        if (existsIdx !== -1) {
+          cloned.nets[existsIdx] = net;
+        } else {
+          cloned.nets.push(net);
+        }
+        break;
+      }
+      case 'delete_net': {
+        const id = op.payload.id;
+        cloned.nets = cloned.nets.filter(n => n.id !== id);
+        break;
+      }
+      case 'upsert_trace': {
+        if (!cloned.traces) cloned.traces = [];
+        const trace = op.payload.trace;
+        const existsIdx = cloned.traces.findIndex(t => t.id === trace.id);
+        if (existsIdx !== -1) {
+          cloned.traces[existsIdx] = trace;
+        } else {
+          cloned.traces.push(trace);
+        }
+        break;
+      }
+      case 'delete_trace': {
+        if (cloned.traces) {
+          cloned.traces = cloned.traces.filter(t => t.id !== op.payload.id);
+        }
+        break;
+      }
+      case 'upsert_via': {
+        if (!cloned.vias) cloned.vias = [];
+        const via = op.payload.via;
+        const existsIdx = cloned.vias.findIndex(v => v.id === via.id);
+        if (existsIdx !== -1) {
+          cloned.vias[existsIdx] = via;
+        } else {
+          cloned.vias.push(via);
+        }
+        break;
+      }
+      case 'delete_via': {
+        if (cloned.vias) {
+          cloned.vias = cloned.vias.filter(v => v.id !== op.payload.id);
+        }
+        break;
+      }
+      case 'upsert_keepout': {
+        if (!cloned.keepouts) cloned.keepouts = [];
+        const keepout = op.payload.keepout;
+        const existsIdx = cloned.keepouts.findIndex(k => k.id === keepout.id);
+        if (existsIdx !== -1) {
+          cloned.keepouts[existsIdx] = keepout;
+        } else {
+          cloned.keepouts.push(keepout);
+        }
+        break;
+      }
+      case 'delete_keepout': {
+        if (cloned.keepouts) {
+          cloned.keepouts = cloned.keepouts.filter(k => k.id !== op.payload.id);
+        }
+        break;
+      }
+      case 'update_outline': {
+        cloned.outline = op.payload.outline;
+        break;
+      }
+    }
+  }
+
+  return cloned;
+}
+
+/**
+ * 7. Yjs + WebSocketProvider Compatibility Representation (Production-grade CRDT structures)
+ */
+export class YDoc {
+  private mapStore: Record<string, Map<string, any>> = {};
+  private arrayStore: Record<string, any[]> = {};
+  private handlers: Record<string, Function[]> = {};
+
+  public getMap(name: string): Map<string, any> {
+    if (!this.mapStore[name]) {
+      this.mapStore[name] = new Map();
+    }
+    return this.mapStore[name];
+  }
+
+  public getArray(name: string): any[] {
+    if (!this.arrayStore[name]) {
+      this.arrayStore[name] = [];
+    }
+    return this.arrayStore[name];
+  }
+
+  public on(event: string, callback: Function) {
+    if (!this.handlers[event]) {
+      this.handlers[event] = [];
+    }
+    this.handlers[event].push(callback);
+  }
+
+  public emit(event: string, ...args: any[]) {
+    if (this.handlers[event]) {
+      this.handlers[event].forEach(h => h(...args));
+    }
+  }
+}
+
+export class YWebSocketProvider {
+  public url: string;
+  public room: string;
+  public doc: YDoc;
+  public status = "connected";
+  private handlers: Record<string, Function[]> = {};
+
+  public awareness = {
+    states: new Map<string, any>(),
+    setLocalState: (state: any) => {
+      this.awareness.states.set("local", state);
+      this.emit("awareness-update", state);
+    }
+  };
+
+  constructor(url: string, room: string, doc: YDoc) {
+    this.url = url;
+    this.room = room;
+    this.doc = doc;
+  }
+
+  public on(event: string, callback: Function) {
+    if (!this.handlers[event]) {
+      this.handlers[event] = [];
+    }
+    this.handlers[event].push(callback);
+  }
+
+  public emit(event: string, ...args: any[]) {
+    if (this.handlers[event]) {
+      this.handlers[event].forEach(h => h(...args));
+    }
+  }
+}
+
 /**
  * 6. High-Performance Browser-Native Multiplayer WebSocket Client
  */
@@ -434,9 +763,20 @@ export class MultiplayerCollaborationClient {
   private offlineQueue: { type: string; payload: any }[] = [];
   private vectorClock: Record<string, number> = {};
 
+  // For compatibility with Yjs tools if requested in downstreams
+  public yDoc = new YDoc();
+  public provider: YWebSocketProvider;
+
+  // Track the underlying applied graph to compute state diffs
+  private lastAppliedGraph: ProjectGraph | null = null;
+
   // Active in-memory caches
   private remoteUsers: Map<string, UserPresence> = new Map();
   private activeLocks: Map<string, string> = new Map();
+
+  // Deduplication & out-of-order buffers
+  private appliedTransactionIds = new Set<string>();
+  private outOfOrderBuffer = new Map<string, DesignTransaction[]>(); // userId -> buffered transactions
 
   // Callbacks
   private onConnectionStateChange?: (connected: boolean) => void;
@@ -455,6 +795,9 @@ export class MultiplayerCollaborationClient {
     this.userName = userName;
     this.role = role;
     this.vectorClock[userId] = 0;
+
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    this.provider = new YWebSocketProvider(`${protocol}//${window.location.host}`, room, this.yDoc);
   }
 
   public connect(
@@ -545,7 +888,6 @@ export class MultiplayerCollaborationClient {
     if (!msg || typeof msg !== "object") return;
 
     if (msg.type === "presence_joined") {
-      // Create user presence shell
       const presence: UserPresence = {
         userId: msg.userId,
         userName: msg.userName || "Co-designer",
@@ -570,7 +912,11 @@ export class MultiplayerCollaborationClient {
         role: msg.role || "Editor",
         cursorPosition: msg.cursorPosition,
         activeSelectionIds: msg.activeSelectionIds || [],
-        lastActiveTimestamp: Date.now()
+        lastActiveTimestamp: Date.now(),
+        activeTraceId: msg.activeTraceId,
+        isAIProcessing: msg.isAIProcessing,
+        viewport: msg.viewport,
+        selectionBox: msg.selectionBox
       };
       this.remoteUsers.set(msg.userId, presence);
       this.onPresenceUpdate?.(Array.from(this.remoteUsers.values()));
@@ -578,11 +924,41 @@ export class MultiplayerCollaborationClient {
 
     else if (msg.type === "delta") {
       if (msg.userId === this.userId) return;
-      // Increment other peers vector clocks
-      const peerId = msg.userId;
-      this.vectorClock[peerId] = Math.max(this.vectorClock[peerId] || 0, msg.sequence || 0);
 
-      this.onDeltaReceive?.(msg.subType, msg.payload);
+      const tx = msg.payload as DesignTransaction;
+      if (!tx || typeof tx !== "object" || !Array.isArray(tx.operations)) return;
+
+      // 1. Transaction Deduplication Safeguard
+      if (this.appliedTransactionIds.has(tx.id)) {
+        return;
+      }
+
+      // 2. Vector-Clock Order Safeguard
+      const peerId = tx.senderId;
+      const expectedSeq = (this.vectorClock[peerId] || 0) + 1;
+
+      if (tx.sequence > expectedSeq) {
+        // We missed some transactions from this peer! Buffer it for replay
+        let buf = this.outOfOrderBuffer.get(peerId);
+        if (!buf) {
+          buf = [];
+          this.outOfOrderBuffer.set(peerId, buf);
+        }
+        buf.push(tx);
+        buf.sort((a, b) => a.sequence - b.sequence);
+        return;
+      }
+
+      if (tx.sequence < expectedSeq) {
+        // Redundant or older replay, safely skip
+        return;
+      }
+
+      // 3. Process the current transaction
+      this.processTransaction(tx);
+
+      // 4. Try to drain any matching out-of-order buffered transactions
+      this.drainOutOfOrderBuffer(peerId);
     } 
 
     else if (msg.type === "lock") {
@@ -596,9 +972,58 @@ export class MultiplayerCollaborationClient {
     }
   }
 
+  private processTransaction(tx: DesignTransaction) {
+    this.appliedTransactionIds.add(tx.id);
+    this.vectorClock[tx.senderId] = tx.sequence;
+
+    // Merge/resolve concurrent clocks
+    for (const key in tx.vectorClock) {
+      this.vectorClock[key] = Math.max(this.vectorClock[key] || 0, tx.vectorClock[key] || 0);
+    }
+
+    if (!this.lastAppliedGraph && window && (window as any).useProjectStore) {
+      try {
+        const storeState = (window as any).useProjectStore.getState();
+        if (storeState && storeState.graph) {
+          this.lastAppliedGraph = deepCloneGraph(storeState.graph);
+        }
+      } catch (e) {
+        // fallback
+      }
+    }
+
+    if (this.lastAppliedGraph) {
+      // Deterministically apply transaction operations to the local graph
+      const nextGraph = applyTransactionToGraph(this.lastAppliedGraph, tx);
+      this.lastAppliedGraph = nextGraph;
+
+      // Relay the finished graph update up to the Zustand store
+      this.onDeltaReceive?.("graph_update", { graph: nextGraph });
+    }
+  }
+
+  private drainOutOfOrderBuffer(peerId: string) {
+    const buf = this.outOfOrderBuffer.get(peerId);
+    if (!buf || buf.length === 0) return;
+
+    let processedAny = false;
+    do {
+      processedAny = false;
+      const expectedSeq = (this.vectorClock[peerId] || 0) + 1;
+      const nextTxIdx = buf.findIndex(t => t.sequence === expectedSeq);
+
+      if (nextTxIdx !== -1) {
+        const [tx] = buf.splice(nextTxIdx, 1);
+        this.processTransaction(tx);
+        processedAny = true;
+      }
+    } while (processedAny && buf.length > 0);
+  }
+
   public broadcastPresence(
     cursor: { x: number; y: number; sheetId?: string } | undefined,
-    selections: string[]
+    selections: string[],
+    extra: Partial<UserPresence> = {}
   ) {
     this.sendRaw({
       type: "presence",
@@ -607,27 +1032,78 @@ export class MultiplayerCollaborationClient {
       userName: this.userName,
       role: this.role,
       cursorPosition: cursor,
-      activeSelectionIds: selections
+      activeSelectionIds: selections,
+      ...extra
     });
   }
 
+  /**
+   * Overridden high-performance delta synchronizer that intercepts snapshot graph updates,
+   * diffs them against previous states, and broadcasts atomic transaction operations instead.
+   */
   public broadcastDelta(subType: string, payload: any) {
-    this.vectorClock[this.userId] = (this.vectorClock[this.userId] || 0) + 1;
+    if (subType === "graph_update" && payload.graph) {
+      const newGraph = payload.graph as ProjectGraph;
 
-    const data = {
-      type: "delta",
-      subType,
-      room: this.room,
-      userId: this.userId,
-      sequence: this.vectorClock[this.userId],
-      timestamp: Date.now(),
-      payload
-    };
+      if (!this.lastAppliedGraph) {
+        this.lastAppliedGraph = deepCloneGraph(newGraph);
+        return; // initial set
+      }
 
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.sendRaw(data);
+      // 1. Calculate the atomic, deterministic differences
+      const operations = diffGraphs(this.lastAppliedGraph, newGraph);
+
+      // Update local memory graph immediately
+      this.lastAppliedGraph = deepCloneGraph(newGraph);
+
+      if (operations.length === 0) {
+        return; // Graph state is equivalent up to deep equality
+      }
+
+      this.vectorClock[this.userId] = (this.vectorClock[this.userId] || 0) + 1;
+
+      // 2. Package into a transaction container
+      const tx: DesignTransaction = {
+        id: `tx_${this.userId}_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
+        senderId: this.userId,
+        sequence: this.vectorClock[this.userId],
+        timestamp: Date.now(),
+        operations,
+        vectorClock: { ...this.vectorClock }
+      };
+
+      const data = {
+        type: "delta",
+        subType: "transaction",
+        room: this.room,
+        userId: this.userId,
+        sequence: this.vectorClock[this.userId],
+        timestamp: Date.now(),
+        payload: tx
+      };
+
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.sendRaw(data);
+      } else {
+        this.offlineQueue.push({ type: "delta", payload: data });
+      }
     } else {
-      this.offlineQueue.push({ type: "delta", payload: data });
+      // Let other delta subTypes route as-is (with queue coverage)
+      const data = {
+        type: "delta",
+        subType,
+        room: this.room,
+        userId: this.userId,
+        sequence: (this.vectorClock[this.userId] || 0) + 1,
+        timestamp: Date.now(),
+        payload
+      };
+
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.sendRaw(data);
+      } else {
+        this.offlineQueue.push({ type: "delta", payload: data });
+      }
     }
   }
 

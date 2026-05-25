@@ -13,8 +13,11 @@ import {
   Info,
   Plus,
   Trash2,
-  Edit
+  Edit,
+  Cpu
 } from 'lucide-react';
+import { GPUCanvas } from './GPUCanvas';
+import { ConstraintOverlayCanvas } from './ConstraintOverlayCanvas';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '@/src/lib/utils';
 import { ProjectGraph } from '../types';
@@ -199,16 +202,17 @@ export function findDiffPair(board: any, netId: string) {
   return null;
 }
 
-const PCBComponentNode = React.memo<{ comp: any; isSelected: boolean; processScale: number; showLabels: boolean; isFCuVisible: boolean; isBCuVisible: boolean; isReadOnly?: boolean; onSelect?: (id: string) => void; onPadClick?: (compId: string, padId: string, e: React.PointerEvent) => void; zoom?: number }>(function PCBComponentNode({ comp, isSelected, processScale, showLabels, isFCuVisible, isBCuVisible, isReadOnly = false, onSelect, onPadClick, zoom = 1 }) {
+const PCBComponentNode = React.memo<{ comp: any; isSelected: boolean; processScale: number; showLabels: boolean; isFCuVisible: boolean; isBCuVisible: boolean; isReadOnly?: boolean; isLocked?: boolean; onSelect?: (id: string) => void; onPadClick?: (compId: string, padId: string, e: React.PointerEvent) => void; zoom?: number }>(function PCBComponentNode({ comp, isSelected, processScale, showLabels, isFCuVisible, isBCuVisible, isReadOnly = false, isLocked = false, onSelect, onPadClick, zoom = 1 }) {
+  const actualReadOnly = isReadOnly || isLocked;
   return (
     <motion.div 
       className={cn(
         "absolute group z-20 transition-all duration-150", 
-        isReadOnly ? "cursor-default" : "cursor-pointer hover:scale-[1.03] active:scale-[0.98]",
+        actualReadOnly ? "cursor-default" : "cursor-pointer hover:scale-[1.03] active:scale-[0.98]",
         isSelected && "z-30"
       )}
       onPointerDown={(e) => { 
-        if (isReadOnly) return;
+        if (actualReadOnly) return;
         e.stopPropagation(); 
         onSelect?.(comp.id); 
       }}
@@ -218,15 +222,19 @@ const PCBComponentNode = React.memo<{ comp: any; isSelected: boolean; processSca
          transform: `rotate(${comp.rotation}deg)` 
       }}
     >
-       <div className={cn("relative border -translate-x-1/2 -translate-y-1/2 flex items-center justify-center transition-colors", isSelected ? "border-indigo-500 shadow-[0_0_15px_#6366f1] bg-indigo-500/10" : "border-amber-500/30 bg-amber-500/5")} style={{ width: 10 * processScale, height: 10 * processScale }}>
-          <span className={cn("text-[6px] font-mono whitespace-nowrap font-bold", isSelected ? "text-indigo-400" : "text-amber-500")}>{comp.designator}</span>
+       <div className={cn("relative border -translate-x-1/2 -translate-y-1/2 flex items-center justify-center transition-colors", 
+         isSelected ? "border-indigo-500 shadow-[0_0_15px_#6366f1] bg-indigo-500/10" : 
+         isLocked ? "border-rose-500/50 bg-rose-500/[0.03] animate-pulse" : 
+         "border-amber-500/30 bg-amber-500/5"
+       )} style={{ width: 10 * processScale, height: 10 * processScale }}>
+          <span className={cn("text-[6px] font-mono whitespace-nowrap font-bold", isSelected ? "text-indigo-400" : isLocked ? "text-rose-400" : "text-amber-500")}>{comp.designator}</span>
           {zoom >= 0.6 && comp.pads.map((pad: any) => {
             const padVisible = pad.layer === 'F.Cu' ? isFCuVisible : (pad.layer === 'B.Cu' ? isBCuVisible : true);
             if (!padVisible) return null;
             return (
               <div key={pad.id} className={cn("absolute rounded-sm", pad.layer === 'F.Cu' ? 'bg-red-500/90 border border-red-500/30 cursor-crosshair hover:bg-red-400' : 'bg-blue-500/90 border border-blue-500/30 cursor-crosshair hover:bg-blue-400', isSelected && 'ring-1 ring-white/50')}
                 onPointerDown={(e) => {
-                   if (isReadOnly) return;
+                   if (actualReadOnly) return;
                    e.stopPropagation();
                    onPadClick?.(comp.id, pad.id, e);
                 }}
@@ -254,6 +262,7 @@ const PCBComponentNode = React.memo<{ comp: any; isSelected: boolean; processSca
       prev.isFCuVisible !== next.isFCuVisible ||
       prev.isBCuVisible !== next.isBCuVisible ||
       prev.isReadOnly !== next.isReadOnly ||
+      prev.isLocked !== next.isLocked ||
       prev.comp.id !== next.comp.id ||
       prev.comp.x !== next.comp.x ||
       prev.comp.y !== next.comp.y ||
@@ -289,6 +298,8 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
   const presences = useProjectStore(state => state.presences);
   const activeLocks = useProjectStore(state => state.activeLocks);
   const broadcastPresenceCursor = useProjectStore(state => state.broadcastPresenceCursor);
+  const orchestrationProgress = useProjectStore(state => state.orchestrationProgress);
+  const taskNodes = useProjectStore(state => state.taskNodes);
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -296,6 +307,7 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
   const lastPanPos = useRef({ x: 0, y: 0 });
 
   const [showThreeD, setShowThreeD] = useState(false);
+  const [gpuAccelerated, setGpuAccelerated] = useState(true);
   const [showExportModal, setShowExportModal] = useState(false);
 
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -340,6 +352,68 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
   const [pointerPos, setPointerPos] = useState({x: 0, y: 0});
   const [pointerPosOther, setPointerPosOther] = useState({x: 0, y: 0});
   const boardRef = useRef<HTMLDivElement>(null);
+
+  const handleApplyAiAction = useCallback((actionType: string, payload: any) => {
+    if (!onCommitTransaction) return;
+
+    const newGraph = JSON.parse(JSON.stringify(graph));
+    if (!newGraph.traces) newGraph.traces = [];
+
+    // Fast static board sync to match netIds
+    const tempBoard = syncBoardFromGraph(newGraph);
+
+    if (actionType === 'widen-copper') {
+      const traceId = payload.traceId;
+      const trace = newGraph.traces.find((t: any) => t.id === traceId);
+      if (trace) {
+        trace.width = payload.newWidth || 0.6;
+        showToast(`AI Assist: Widened trace ${traceId} to ${trace.width}mm for current density.`);
+        onCommitTransaction(newGraph);
+      }
+    } else if (actionType === 'smooth-angle') {
+      const traceIds = payload.traceIds || [];
+      let smoothed = 0;
+      traceIds.forEach((id: string) => {
+        const trace = newGraph.traces.find((t: any) => t.id === id);
+        if (trace) {
+          if (Math.hypot(trace.startX - payload.x, trace.startY - payload.y) < 0.2) {
+            trace.startX += (trace.endX - trace.startX) * 0.15;
+            trace.startY += (trace.endY - trace.startY) * 0.15;
+            smoothed++;
+          } else if (Math.hypot(trace.endX - payload.x, trace.endY - payload.y) < 0.2) {
+            trace.endX += (trace.startX - trace.endX) * 0.15;
+            trace.endY += (trace.startY - trace.endY) * 0.15;
+            smoothed++;
+          }
+        }
+      });
+      if (smoothed > 0) {
+        showToast(`AI Assist: Smoothed layout sharp corner by chamfering.`);
+        onCommitTransaction(newGraph);
+      }
+    } else if (actionType === 'trombone-tune') {
+      const netName = payload.netName;
+      const netObj = tempBoard.nets.find(n => n.name === netName);
+      if (netObj) {
+        newGraph.traces = newGraph.traces.filter((t: any) => t.netId !== netObj.id);
+        const path = payload.path;
+        for (let i = 0; i < path.length - 1; i++) {
+          newGraph.traces.push({
+            id: `ai-tr-${netObj.id}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+            netId: netObj.id,
+            layer: (routingState?.layer as any) || "F.Cu",
+            width: 0.15,
+            startX: path[i].x,
+            startY: path[i].y,
+            endX: path[i + 1].x,
+            endY: path[i + 1].y
+          });
+        }
+        showToast(`AI Assist: Applied high-speed trombone line tuning onto Net '${netName}'.`);
+        onCommitTransaction(newGraph);
+      }
+    }
+  }, [graph, routingState, onCommitTransaction, showToast]);
 
   const [layers, setLayers] = useState([
     { id: 'F.Cu', name: 'Top Layer', color: 'bg-red-500', visible: true },
@@ -1208,6 +1282,12 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
 
       {/* Main Canvas Area */}
       <main 
+        onMouseMove={(e) => {
+          const bounds = e.currentTarget.getBoundingClientRect();
+          const x = e.clientX - bounds.left;
+          const y = e.clientY - bounds.top;
+          broadcastPresenceCursor(x, y);
+        }}
         onTouchStart={(e) => {
           if (e.touches.length === 2) {
             const dist = Math.hypot(
@@ -1245,7 +1325,7 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
         <motion.div 
           ref={boardRef}
           onClick={handleBoardClick}
-          className={cn("relative bg-[#111] border-[4px] border-[#1a1a1a] shadow-[0_0_100px_rgba(0,0,0,0.5),inset_0_0_40px_rgba(0,0,0,0.8)]", activeTool === 'route' ? "cursor-crosshair" : "")}
+          className={cn("relative bg-[#111] border-[4px] border-[#1a1a1a] shadow-[0_0_100px_rgba(0,0,0,0.5),inset_0_0_40px_rgba(0,0,0,0.8)] overflow-hidden", activeTool === 'route' ? "cursor-crosshair" : "")}
           style={{ width: 100 * processScale, height: 100 * processScale }} // Assuming 100x100mm board max for preview
           initial={{ scale: 0.8, opacity: 0 }}
           animate={{ scale: zoom, opacity: 1 }}
@@ -1256,6 +1336,29 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
           onDragStart={() => setIsDragging(true)}
           onDragEnd={() => setIsDragging(false)}
         >
+          {/* WebGL GPU Accelerated Canvas Background Layer */}
+          {gpuAccelerated && (
+            <GPUCanvas
+              graph={graph}
+              activeLayer={(routingState?.layer as any) || "F.Cu"}
+              pan={pan}
+              zoom={zoom}
+              presences={presences}
+              activeLocks={activeLocks}
+              showMultiplayerCursors={false} // Avoid duplicate overlays since PCBEditor renders them
+            />
+          )}
+          {gpuAccelerated && (
+            <ConstraintOverlayCanvas
+              graph={graph}
+              activeLayer={(routingState?.layer as any) || "F.Cu"}
+              pan={pan}
+              zoom={zoom}
+              presences={presences}
+              activeLocks={activeLocks}
+              onApplyAiAction={handleApplyAiAction}
+            />
+          )}
           {/* AI Scanning Overlay */}
           {isFixing && (
             <motion.div 
@@ -1285,71 +1388,75 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
           )}
 
           {/* Render Committed Traces */}
-          <svg className="absolute inset-0 w-full h-full pointer-events-none z-10 overflow-visible">
-            {board.traces.map(t => {
-               const visible = t.layer === 'F.Cu' ? isFCuVisible : isBCuVisible;
-               if (!visible) return null;
-               // Viewport culling
-               if (!isElementVisible(t.startX, t.startY, 2) && !isElementVisible(t.endX, t.endY, 2)) {
-                   return null;
-               }
-               
-               // Detect high speed differential trace
-               const isDpTrace = board.diffPairs?.some((dp: any) => dp.positiveNetId === t.netId || dp.negativeNetId === t.netId)
-                                 || t.netId.includes("USB_D") || t.netId.includes("_P") || t.netId.includes("_N");
-               return (
-                 <g key={t.id}>
-                   {isDpTrace && (
+          {!gpuAccelerated && (
+            <svg className="absolute inset-0 w-full h-full pointer-events-none z-10 overflow-visible">
+              {board.traces.map(t => {
+                 const visible = t.layer === 'F.Cu' ? isFCuVisible : isBCuVisible;
+                 if (!visible) return null;
+                 // Viewport culling
+                 if (!isElementVisible(t.startX, t.startY, 2) && !isElementVisible(t.endX, t.endY, 2)) {
+                     return null;
+                 }
+                 
+                 // Detect high speed differential trace
+                 const isDpTrace = board.diffPairs?.some((dp: any) => dp.positiveNetId === t.netId || dp.negativeNetId === t.netId)
+                                   || t.netId.includes("USB_D") || t.netId.includes("_P") || t.netId.includes("_N");
+                 return (
+                   <g key={t.id}>
+                     {isDpTrace && (
+                       <line 
+                         x1={t.startX * processScale + 50 * processScale}
+                         y1={t.startY * processScale + 50 * processScale}
+                         x2={t.endX * processScale + 50 * processScale}
+                         y2={t.endY * processScale + 50 * processScale}
+                         stroke="#10b981"
+                         strokeWidth={t.width * processScale + 6}
+                         opacity="0.12"
+                         strokeLinecap="round"
+                       />
+                     )}
                      <line 
+                       key={t.id}
                        x1={t.startX * processScale + 50 * processScale}
                        y1={t.startY * processScale + 50 * processScale}
                        x2={t.endX * processScale + 50 * processScale}
                        y2={t.endY * processScale + 50 * processScale}
-                       stroke="#10b981"
-                       strokeWidth={t.width * processScale + 6}
-                       opacity="0.12"
+                       stroke={t.layer === 'F.Cu' ? '#ef4444' : '#3b82f6'}
+                       strokeWidth={t.width * processScale}
                        strokeLinecap="round"
                      />
-                   )}
-                   <line 
-                     key={t.id}
-                     x1={t.startX * processScale + 50 * processScale}
-                     y1={t.startY * processScale + 50 * processScale}
-                     x2={t.endX * processScale + 50 * processScale}
-                     y2={t.endY * processScale + 50 * processScale}
-                     stroke={t.layer === 'F.Cu' ? '#ef4444' : '#3b82f6'}
-                     strokeWidth={t.width * processScale}
-                     strokeLinecap="round"
-                   />
-                 </g>
-               );
-            })}
-          </svg>
+                   </g>
+                 );
+              })}
+            </svg>
+          )}
 
           {/* Render Vias */}
-          <svg className="absolute inset-0 w-full h-full pointer-events-none z-30 overflow-visible">
-            {(board.vias || []).map((v: any) => {
-               if (!isElementVisible(v.x, v.y, 1)) return null;
-               return (
-                 <g key={v.id}>
-                   <circle 
-                     cx={v.x * processScale + 50 * processScale}
-                     cy={v.y * processScale + 50 * processScale}
-                     r={(v.padSize || 0.6) * processScale / 2}
-                     fill="#fbbf24"
-                     stroke="#d97706"
-                     strokeWidth="1"
-                   />
-                   <circle 
-                     cx={v.x * processScale + 50 * processScale}
-                     cy={v.y * processScale + 50 * processScale}
-                     r={(v.drillSize || 0.3) * processScale / 2}
-                     fill="#111"
-                   />
-                 </g>
-               );
-            })}
-          </svg>
+          {!gpuAccelerated && (
+            <svg className="absolute inset-0 w-full h-full pointer-events-none z-30 overflow-visible">
+              {(board.vias || []).map((v: any) => {
+                 if (!isElementVisible(v.x, v.y, 1)) return null;
+                 return (
+                   <g key={v.id}>
+                     <circle 
+                       cx={v.x * processScale + 50 * processScale}
+                       cy={v.y * processScale + 50 * processScale}
+                       r={(v.padSize || 0.6) * processScale / 2}
+                       fill="#fbbf24"
+                       stroke="#d97706"
+                       strokeWidth="1"
+                     />
+                     <circle 
+                       cx={v.x * processScale + 50 * processScale}
+                       cy={v.y * processScale + 50 * processScale}
+                       r={(v.drillSize || 0.3) * processScale / 2}
+                       fill="#111"
+                     />
+                   </g>
+                 );
+              })}
+            </svg>
+          )}
 
           {/* Render Active Routing Ghost */}
           {activeTool === 'route' && routingState && (
@@ -1449,6 +1556,7 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
                   isFCuVisible={isFCuVisible}
                   isBCuVisible={isBCuVisible}
                   isReadOnly={isReadOnly}
+                  isLocked={!!activeLocks[comp.id]}
                   onSelect={onSelect} 
                   onPadClick={handlePadClick}
                   zoom={zoom}
@@ -1494,6 +1602,19 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
            <span className="text-[10px] font-mono font-bold text-gray-300 w-10 text-center">{Math.round(zoom * 100)}%</span>
            <div className="h-4 w-[1px] bg-white/10" />
            <button onClick={() => setZoom(z => Math.min(3, z + 0.2))} className="p-3 md:p-2 text-gray-400 hover:text-white transition-colors min-w-[44px] min-h-[44px] md:min-w-0 md:min-h-0 flex items-center justify-center cursor-pointer active:scale-95"><Maximize2 size={14} /></button>
+           <div className="h-4 w-[1px] bg-white/10" />
+           <button 
+             onClick={() => setGpuAccelerated(prev => !prev)} 
+             className={cn(
+               "px-2 px-2.5 py-1 rounded-full text-[8px] font-black uppercase tracking-wider transition-all cursor-pointer active:scale-95 flex items-center gap-1",
+               gpuAccelerated 
+                 ? "bg-rose-500/15 border border-rose-500/35 text-rose-400 font-black shadow-[0_0_12px_rgba(239,68,68,0.25)]" 
+                 : "bg-white/5 border border-white/5 text-gray-400 hover:text-white"
+             )}
+           >
+             <Cpu size={10} className={gpuAccelerated ? "animate-pulse" : ""} />
+             <span>GPU {gpuAccelerated ? "ON" : "OFF"}</span>
+           </button>
         </div>
 
         {/* Mobile Mini-Layers Toggle */}
@@ -1702,6 +1823,7 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
             </motion.div>
           )}
         </AnimatePresence>
+        <MultiplayerCursors presences={presences} activeLocks={activeLocks} />
       </main>
 
       {/* Right Sidebar - Layers & Inspector */}
@@ -2376,6 +2498,31 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {orchestrationProgress && (
+        <div className="absolute bottom-6 right-6 bg-[#09090b]/95 backdrop-blur-md border border-white/5 p-4 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.85)] z-40 w-80 flex flex-col gap-3 font-mono border-l-2 border-l-indigo-500 text-gray-300 pointer-events-auto">
+          <div className="flex items-center justify-between border-b border-white/5 pb-2">
+            <div className="flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
+              <span className="text-[10px] font-black uppercase text-gray-300 tracking-wider">PCB Routing Orchestration</span>
+            </div>
+            <span className="text-[10px] bg-indigo-500/15 text-indigo-400 px-2 py-0.5 rounded font-black">{orchestrationProgress.percent}%</span>
+          </div>
+          <div className="space-y-1.5 text-[11px] max-h-[120px] overflow-y-auto pr-1 flex-1">
+            {taskNodes.map(node => (
+              <div key={node.id} className="flex items-center justify-between py-0.5">
+                <span className="text-gray-400 font-medium truncate max-w-[180px]">{node.name}</span>
+                <span className={`text-[8px] uppercase tracking-wider font-extrabold px-1 rounded ${
+                  node.status === 'completed' ? 'text-emerald-400 bg-emerald-500/10' :
+                  node.status === 'running' ? 'text-indigo-400 bg-indigo-500/10 animate-pulse' :
+                  node.status === 'failed' ? 'text-rose-400 bg-rose-500/10' :
+                  'text-gray-500'
+                }`}>{node.status}</span>
+              </div>
+            ))}
           </div>
         </div>
       )}

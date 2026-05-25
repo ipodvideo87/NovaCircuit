@@ -77,6 +77,8 @@ import { validateAndApplyActions } from '../lib/actionValidation';
 import { useTransactionManager, deepCloneGraph } from '../lib/transaction';
 import { useProjectStore } from '../lib/core/store';
 import { MultiplayerCursors } from './MultiplayerCursors';
+import { WorkspaceHeader } from './WorkspaceHeader';
+import ManufacturingHUD from './ManufacturingHUD';
 import { Users, Wifi, WifiOff } from 'lucide-react';
 import { runSystemRegressionSuite } from '../lib/testHarness';
 import { runERC, ERCIssue } from '../lib/erc';
@@ -507,7 +509,7 @@ const initialEdges = [
   { id: 'e1-2', source: '2', target: '1', animated: true, style: { stroke: '#6366f1' } }
 ];
 
-type EditorView = 'schematic' | 'pcb' | '3d';
+type EditorView = 'schematic' | 'pcb' | '3d' | 'mfg';
 
 export function useReplayEngine(tracesRef: React.MutableRefObject<AIExecutionTrace[]>) {
   const [replayIndex, setReplayIndex] = useState<number | null>(null);
@@ -941,8 +943,9 @@ export default function SchematicEditor() {
     const storeStr = JSON.stringify(storeGraph);
     if (activeStr !== storeStr) {
       commitTransaction(storeGraph);
+      applyGraphToEditor(storeGraph);
     }
-  }, [storeGraph, transientActiveGraph, commitTransaction]);
+  }, [storeGraph, transientActiveGraph, commitTransaction, applyGraphToEditor]);
 
   // Collaborative Multiplayer State & Setup Hook
   const isConnected = useProjectStore(state => state.isConnected);
@@ -951,6 +954,8 @@ export default function SchematicEditor() {
   const joinRoom = useProjectStore(state => state.joinRoom);
   const disconnectMultiplayer = useProjectStore(state => state.disconnectMultiplayer);
   const broadcastPresenceCursor = useProjectStore(state => state.broadcastPresenceCursor);
+  const orchestrationProgress = useProjectStore(state => state.orchestrationProgress);
+  const taskNodes = useProjectStore(state => state.taskNodes);
 
   const [multiplayerRoom, setMultiplayerRoom] = useState("flux-main-sandbox");
   const [multiplayerUserName, setMultiplayerUserName] = useState(() => `Designer_${Math.floor(Math.random() * 90) + 10}`);
@@ -1056,26 +1061,36 @@ export default function SchematicEditor() {
   }, []);
 
   const applyGraphToEditor = useCallback((graph: ProjectGraph) => {
+    const locks = useProjectStore.getState().activeLocks;
     setNodes((prevNodes) => {
       console.time('apply mapGraphToFlow - nodes');
       const { nodes: newNodes } = mapGraphToFlow(graph, prevNodes, undefined);
       console.timeEnd('apply mapGraphToFlow - nodes');
       const prevMap = new Map<string, any>((prevNodes || []).map((p: any) => [p.id, p]));
       return newNodes.map((nn) => {
+        const isLocked = locks && locks[nn.id];
+        const draggable = !isLocked;
+        const selectable = !isLocked;
         const existingNode = prevMap.get(nn.id);
-        if (existingNode && existingNode === nn) {
+        if (existingNode && existingNode === nn && existingNode.draggable === draggable && existingNode.selectable === selectable) {
           return existingNode;
         }
         if (existingNode) {
           return {
             ...existingNode,
             ...nn,
-            selected: existingNode.selected,
+            selected: isLocked ? false : existingNode.selected,
             dragging: existingNode.dragging,
-            position: existingNode.dragging ? existingNode.position : nn.position
+            position: existingNode.dragging ? existingNode.position : nn.position,
+            draggable,
+            selectable
           };
         }
-        return nn;
+        return {
+          ...nn,
+          draggable,
+          selectable
+        };
       });
     });
     
@@ -1619,80 +1634,14 @@ export default function SchematicEditor() {
   }, [searchQuery]);
 
   const topNavigation = useMemo(() => (
-      <header className="h-12 border-b border-white/10 flex items-center justify-between px-3 md:px-4 z-[100] bg-[#0d0d0d] shrink-0">
-        <div className="flex items-center gap-2 md:gap-4 overflow-hidden">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 md:w-8 md:h-8 bg-black border border-white/10 rounded flex items-center justify-center font-bold text-base md:text-lg text-white italic">F</div>
-            {!isMobile && <span className="font-black text-xs uppercase tracking-widest text-indigo-400">Flux Intel v4.0</span>}
-          </div>
-          
-          <div className="h-4 w-[1px] bg-white/10 mx-1 md:mx-2" />
-
-          {/* Breadcrumbs - Simplified on Mobile */}
-          <div className="flex items-center gap-1 md:gap-1.5 overflow-hidden">
-            <button 
-              onClick={() => setDrcWarnings(prev => ["INFO: Active mesh workspace: PRO-DESIGN-POOL (rev 4).", "INFO: All schematic blocks synchronized.", ...prev].slice(0, 5))}
-              className="text-gray-300 md:text-gray-500 hover:text-white transition-colors text-xs font-bold md:font-medium truncate max-w-[100px] md:max-w-none cursor-pointer"
-            >
-              PRO-DESIGN-POOL
-            </button>
-            <ChevronDown size={10} className="text-gray-700 -rotate-90 shrink-0" />
-            <div className="flex items-center gap-1 bg-indigo-500/10 px-1.5 md:px-2 py-0.5 rounded border border-indigo-500/20 shrink-0 select-none">
-              <div className="w-1 h-1 rounded-full bg-indigo-400 animate-pulse" />
-              <span className="text-[9px] md:text-[10px] font-black text-indigo-400 uppercase tracking-widest leading-none">LIVE MESH ACTIVE</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2 md:gap-3">
-          {/* User Avatars - Hide on Mobile or show single */}
-          <div className="hidden sm:flex -space-x-2 mr-2 text-white">
-            <div className="w-6 h-6 md:w-7 md:h-7 rounded-full border-2 border-[#0d0d0d] bg-indigo-600 flex items-center justify-center text-[8px] md:text-[9px] font-bold select-none">JS</div>
-            <div className="w-6 h-6 md:w-7 md:h-7 rounded-full border-2 border-[#0d0d0d] bg-purple-600 flex items-center justify-center text-[8px] md:text-[9px] font-bold select-none">+2</div>
-          </div>
-
-          <button 
-            onClick={() => { if (canInteract('new_project')) { setActiveModal('new_project'); } }}
-            className={cn(
-              "flex items-center gap-2 bg-indigo-600 text-white hover:bg-indigo-500 rounded-lg text-[10px] md:text-xs font-black uppercase tracking-widest transition-all cursor-pointer shadow-lg shadow-indigo-600/20 active:scale-95",
-              isMobile ? "min-h-[44px] min-w-[44px] justify-center" : "px-3 py-1.5"
-            )}
-          >
-            <Plus size={isMobile ? 18 : 14} />
-            {!isMobile && "New"}
-          </button>
-
-          <button 
-            onClick={() => setActiveModal('bom')}
-            className={cn(
-              "flex items-center gap-2 bg-white/5 border border-white/10 hover:bg-white/10 rounded-lg text-[10px] md:text-xs font-black uppercase tracking-widest transition-all cursor-pointer text-gray-400 hover:text-white active:scale-95",
-              isMobile ? "min-h-[44px] min-w-[44px] justify-center" : "px-3 py-1.5"
-            )}
-          >
-            <FileText size={isMobile ? 18 : 14} />
-            {!isMobile && "BOM"}
-          </button>
-
-          <button 
-            onClick={() => setActiveModal('share')}
-            className={cn(
-              "flex items-center gap-2 bg-white text-black hover:bg-gray-200 rounded-lg text-[10px] md:text-xs font-black uppercase tracking-widest transition-all cursor-pointer shadow-lg active:scale-95",
-              isMobile ? "min-h-[44px] min-w-[44px] justify-center" : "px-4 py-1.5"
-            )}
-          >
-            <Share2 size={isMobile ? 18 : 14} />
-            {!isMobile && "Share"}
-          </button>
-          
-          <button 
-            onClick={() => setActiveModal('settings')}
-            className="p-2 text-gray-400 hover:text-white transition-all cursor-pointer active:scale-95 min-h-[44px] min-w-[44px] flex items-center justify-center"
-          >
-            <Settings size={isMobile ? 22 : 18} />
-          </button>
-        </div>
-      </header>
-  ), [isMobile, canInteract]);
+    <WorkspaceHeader 
+      currentView={view} 
+      onViewChange={(v) => handleSetView(v as EditorView)}
+      onOpenShare={() => setActiveModal('share')}
+      onOpenSettings={() => setActiveModal('settings')}
+      onOpenNewProject={() => { if (canInteract('new_project')) { setActiveModal('new_project'); } }}
+    />
+  ), [view, isMobile, canInteract, handleSetView]);
 
   const leftSidebar = useMemo(() => (
         <aside className={cn(
@@ -2767,6 +2716,31 @@ export default function SchematicEditor() {
                         <span className="font-extrabold uppercase tracking-widest">{mode === 'replay' ? 'Replay Mode' : 'Inspect Mode'} Active &mdash; Editor is Read-Only</span>
                       </Panel>
                     )}
+
+                    {orchestrationProgress && (
+                      <Panel position="bottom-right" className="bg-[#09090b]/95 backdrop-blur-md border border-white/5 p-3.5 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.85)] z-20 w-80 flex flex-col gap-3 font-mono border-l-2 border-l-indigo-500 text-gray-300 pointer-events-auto">
+                        <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
+                            <span className="text-[10px] font-black uppercase text-gray-300 tracking-wider">Orchestration Active</span>
+                          </div>
+                          <span className="text-[10px] bg-indigo-500/15 text-indigo-400 px-2 py-0.5 rounded font-black">{orchestrationProgress.percent}%</span>
+                        </div>
+                        <div className="space-y-1.5 text-[11px] max-h-[120px] overflow-y-auto pr-1">
+                          {taskNodes.map(node => (
+                            <div key={node.id} className="flex items-center justify-between py-0.5">
+                              <span className="text-gray-400 font-medium truncate max-w-[180px]">{node.name}</span>
+                              <span className={`text-[8px] uppercase tracking-wider font-extrabold px-1 rounded ${
+                                node.status === 'completed' ? 'text-emerald-400 bg-emerald-500/10' :
+                                node.status === 'running' ? 'text-indigo-400 bg-indigo-500/10 animate-pulse' :
+                                node.status === 'failed' ? 'text-rose-400 bg-rose-500/10' :
+                                'text-gray-500'
+                              }`}>{node.status}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </Panel>
+                    )}
                   </ReactFlow>
 
                   <MultiplayerCursors presences={presences} activeLocks={activeLocks} />
@@ -3023,7 +2997,7 @@ export default function SchematicEditor() {
                     mode={mode}
                   />
                 </motion.div>
-              ) : (
+              ) : view === '3d' ? (
                 <motion.div key="3d" className="w-full h-full bg-[#050505] flex items-center justify-center p-6 md:p-12 text-center" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                    <div className="flex flex-col items-center gap-8 relative">
                     <div className="absolute inset-0 bg-indigo-500/10 blur-[100px] rounded-full" />
@@ -3044,6 +3018,16 @@ export default function SchematicEditor() {
                       <p className="text-[10px] text-indigo-400 font-bold uppercase tracking-widest opacity-60">High Resolution WebGL Rasterization...</p>
                     </div>
                   </div>
+                </motion.div>
+              ) : (
+                <motion.div 
+                  key="mfg" 
+                  className="w-full h-full bg-[#040406] overflow-y-auto p-4 md:p-6"
+                  initial={{ opacity: 0 }} 
+                  animate={{ opacity: 1 }} 
+                  exit={{ opacity: 0 }}
+                >
+                  <ManufacturingHUD />
                 </motion.div>
               )}
             </AnimatePresence>

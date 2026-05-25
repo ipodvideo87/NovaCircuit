@@ -229,6 +229,202 @@ function applyAction(action: AIAction, graph: ProjectGraph) {
       break;
     }
 
+    case 'add_connection': {
+      // Alias key to connect_net for structural integrity
+      const { from, to } = action.args;
+      if (!from || !to) throw new Error("Missing 'from' or 'to' parameters");
+      if (from === to) throw new Error("Cannot connect a pin to itself");
+      
+      const parsePin = (str: string) => {
+        const parts = str.split('.');
+        if (parts.length !== 2) throw new Error(`Invalid pin format: ${str}. Expected 'Component.Pin'`);
+        return { componentId: parts[0], pinName: parts[1] };
+      };
+      
+      const pinA = parsePin(from);
+      const pinB = parsePin(to);
+      
+      const compA = graph.components.find(c => c.designator === pinA.componentId);
+      if (!compA) throw new Error(`Source component '${pinA.componentId}' not found.`);
+      const compB = graph.components.find(c => c.designator === pinB.componentId);
+      if (!compB) throw new Error(`Target component '${pinB.componentId}' not found.`);
+      
+      let netNum = 1;
+      while(graph.nets.some(n => n.id === `net-${netNum}`)) netNum++;
+      
+      graph.nets.push({
+        id: `net-${netNum}`,
+        name: `Net-${pinA.componentId}_${pinA.pinName}`,
+        netClass: 'SIGNAL',
+        type: action.args.netType || 'signal',
+        connections: [pinA, pinB]
+      });
+      break;
+    }
+
+    case 'create_trace': {
+      if (!graph.traces) graph.traces = [];
+      const { id, netId, layer, width, startX, startY, endX, endY } = action.args;
+      
+      // Basic design rule check on trace length/coordinates
+      if (startX === endX && startY === endY) {
+         throw new Error(`Invalid zero-length trace path at [${startX}, ${startY}]`);
+      }
+
+      const generatedId = id || `tr-${Math.random().toString(36).slice(2, 8)}`;
+      if (graph.traces.some(t => t.id === generatedId)) {
+        throw new Error(`Trace ID '${generatedId}' already exists.`);
+      }
+
+      graph.traces.push({
+        id: generatedId,
+        netId,
+        layer,
+        width,
+        startX,
+        startY,
+        endX,
+        endY
+      });
+      break;
+    }
+
+    case 'create_via': {
+      if (!graph.vias) graph.vias = [];
+      const { id, netId, x, y, drillSize, padSize } = action.args;
+      
+      const generatedId = id || `via-${Math.random().toString(36).slice(2, 8)}`;
+      if (graph.vias.some(v => v.id === generatedId)) {
+        throw new Error(`Via ID '${generatedId}' already exists.`);
+      }
+
+      graph.vias.push({
+        id: generatedId,
+        netId,
+        x,
+        y,
+        drillSize,
+        padSize
+      });
+      break;
+    }
+
+    case 'delete_trace': {
+      if (!graph.traces) graph.traces = [];
+      const { traceId } = action.args;
+      const index = graph.traces.findIndex(t => t.id === traceId);
+      if (index === -1) throw new Error(`Trace with id '${traceId}' not found.`);
+      graph.traces.splice(index, 1);
+      break;
+    }
+
+    case 'update_trace_width': {
+      if (!graph.traces) graph.traces = [];
+      const { traceId, newWidth } = action.args;
+      const trace = graph.traces.find(t => t.id === traceId);
+      if (!trace) throw new Error(`Trace with id '${traceId}' not found.`);
+      trace.width = newWidth;
+      break;
+    }
+
+    case 'add_copper_pour': {
+      if (!graph.keepouts) graph.keepouts = [];
+      const { id, x, y, width, height, layers, restrictions } = action.args;
+      if (graph.keepouts.some(k => k.id === id)) {
+        throw new Error(`Copper zone/Keepout layout with ID '${id}' already exists.`);
+      }
+      graph.keepouts.push({
+        id, x, y, width, height, layers, restrictions
+      });
+      break;
+    }
+
+    case 'add_via_stitching': {
+      if (!graph.vias) graph.vias = [];
+      const { netId, x1, y1, x2, y2, gridSpacing, drillSize, padSize } = action.args;
+      
+      // Calculate a deterministic grid of via stitch insertions
+      const startX = Math.min(x1, x2);
+      const endX = Math.max(x1, x2);
+      const startY = Math.min(y1, y2);
+      const endY = Math.max(y1, y2);
+      
+      let count = 0;
+      for (let tx = startX; tx <= endX; tx += gridSpacing) {
+        for (let ty = startY; ty <= endY; ty += gridSpacing) {
+          const viaId = `via-stitch-${netId}-${tx}-${ty}`;
+          if (!graph.vias.some(v => v.id === viaId)) {
+            graph.vias.push({
+              id: viaId,
+              netId,
+              x: tx,
+              y: ty,
+              drillSize,
+              padSize
+            });
+            count++;
+          }
+        }
+      }
+      if (count === 0) {
+        throw new Error(`Boundary area too small to fit gridSpacing stitch vias.`);
+      }
+      break;
+    }
+
+    case 'route_differential_pair': {
+      if (!graph.traces) graph.traces = [];
+      const { positiveNetId, negativeNetId, startX, startY, endX, endY, spacing, width, layer } = action.args;
+      
+      // Route twin traces parallel with spacing offset
+      const dx = endX - startX;
+      const dy = endY - startY;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len === 0) throw new Error(`Zero-length differential pair path.`);
+      
+      // Normal vector
+      const nx = -dy / len;
+      const ny = dx / len;
+      
+      // Spacing half offset
+      const halfS = spacing / 2;
+      
+      // Pos trace
+      const posX1 = startX + nx * halfS;
+      const posY1 = startY + ny * halfS;
+      const posX2 = endX + nx * halfS;
+      const posY2 = endY + ny * halfS;
+      
+      // Neg trace
+      const negX1 = startX - nx * halfS;
+      const negY1 = startY - ny * halfS;
+      const negX2 = endX - nx * halfS;
+      const negY2 = endY - ny * halfS;
+
+      graph.traces.push({
+        id: `tr-diff-p-${positiveNetId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
+        netId: positiveNetId,
+        layer,
+        width,
+        startX: posX1,
+        startY: posY1,
+        endX: posX2,
+        endY: posY2
+      });
+
+      graph.traces.push({
+        id: `tr-diff-n-${negativeNetId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
+        netId: negativeNetId,
+        layer,
+        width,
+        startX: negX1,
+        startY: negY1,
+        endX: negX2,
+        endY: negY2
+      });
+      break;
+    }
+
     case 'run_erc':
     case 'run_drc':
     case 'run_simulator':

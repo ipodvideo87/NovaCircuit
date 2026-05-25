@@ -5,6 +5,8 @@ import { validateAndApplyActions } from '../actionValidation';
 import { ConstraintDrivenRoutingSystem } from '../routingSystem';
 import { AutonomousOptimizationRuntime } from '../optimizationRuntime';
 import { MultiplayerCollaborationClient, UserPresence } from '../collaborationRuntime';
+import { EngineeringCommandRuntime, CommandRuntimeStatus } from '../engineering/commandRuntime';
+import { TaskNode } from '../engineering/taskGraph';
 
 export interface ProjectState {
   graph: ProjectGraph;
@@ -22,6 +24,11 @@ export interface ProjectState {
   presences: UserPresence[];
   activeLocks: Record<string, string>;
 
+  // Orchestrator Engine State Properties
+  commandRuntime: EngineeringCommandRuntime | null;
+  taskNodes: TaskNode[];
+  orchestrationProgress: CommandRuntimeStatus | null;
+
   // Actions
   setGraph: (graph: ProjectGraph) => void;
   toggleLayer: () => void;
@@ -36,12 +43,23 @@ export interface ProjectState {
   runOptimizationPass: () => { success: boolean; initialScore: number; optimizedScore: number; logs: string[] };
   autoRouteAllNets: (ratnestWires: any[]) => { success: boolean; routedCount: number; failedCount: number; logs: string[] };
 
+  // Orchestration Hooks and Transaction actions
+  executeEngineeringCommand: (command: string, preferredCenter?: { x: number; y: number }) => void;
+  runMacro: (macroName: string, preferredCenter?: { x: number; y: number }) => void;
+  stepEngineeringStage: () => Promise<void>;
+  runAllEngineeringStages: () => Promise<void>;
+  rollbackEngineeringCommand: () => void;
+  getTaskStatus: () => CommandRuntimeStatus | null;
+  resumeFromCheckpoint: (checkpointId: string) => void;
+
   // Multiplayer Actions
   joinRoom: (roomName: string, userName: string) => void;
   broadcastPresenceCursor: (x: number, y: number) => void;
   acquireLock: (elementId: string) => void;
   releaseLock: (elementId: string) => void;
   disconnectMultiplayer: () => void;
+  broadcastDelta: (subType: string, payload: any) => void;
+  applyRemoteDelta: (subType: string, payload: any) => void;
 }
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
@@ -68,6 +86,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   isConnected: false,
   presences: [],
   activeLocks: {},
+
+  // Orchestrator State
+  commandRuntime: null,
+  taskNodes: [],
+  orchestrationProgress: null,
 
   setGraph: (graph) => set({ graph: deepCloneGraph(graph) }),
 
@@ -203,6 +226,121 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     };
   },
 
+  // Orchestrator Action Implementations
+  executeEngineeringCommand: (command, preferredCenter) => {
+    const currentGraph = get().graph;
+    const runtime = new EngineeringCommandRuntime(currentGraph);
+    const plan = runtime.initiateCommand(command, preferredCenter);
+    set({
+      commandRuntime: runtime,
+      taskNodes: plan.getNodes(),
+      orchestrationProgress: runtime.getOverallProgress()
+    });
+  },
+
+  runMacro: (macroName, preferredCenter) => {
+    get().executeEngineeringCommand(`Build ${macroName}`, preferredCenter);
+  },
+
+  stepEngineeringStage: async () => {
+    const { commandRuntime } = get();
+    if (!commandRuntime) return;
+    
+    set({ isAIProcessing: true });
+    try {
+      const stepResult = await commandRuntime.stepExecution();
+      
+      // Update store's active graph and task status state
+      set({
+        taskNodes: commandRuntime.getActiveTaskGraph()?.getNodes() || [],
+        orchestrationProgress: commandRuntime.getOverallProgress(),
+        isAIProcessing: false
+      });
+
+      if (stepResult.success && stepResult.executedNodes.length > 0) {
+        // Find executed nodes and commit transaction to graph
+        get().commitTransaction(stepResult.graph);
+      }
+    } catch (e) {
+      console.error("Step execution error:", e);
+      set({ isAIProcessing: false });
+    }
+  },
+
+  runAllEngineeringStages: async () => {
+    const { commandRuntime } = get();
+    if (!commandRuntime) return;
+
+    let nextNodes = commandRuntime.getActiveTaskGraph()?.getExecutableNodes() || [];
+    while (nextNodes.length > 0) {
+      set({ isAIProcessing: true });
+      const stepResult = await commandRuntime.stepExecution();
+      
+      set({
+        taskNodes: commandRuntime.getActiveTaskGraph()?.getNodes() || [],
+        orchestrationProgress: commandRuntime.getOverallProgress(),
+        isAIProcessing: false
+      });
+
+      if (stepResult.success && stepResult.executedNodes.length > 0) {
+        get().commitTransaction(stepResult.graph);
+      } else if (!stepResult.success) {
+        break; // safety halt on node transactional failure
+      }
+
+      await new Promise(r => setTimeout(r, 600)); // smooth spacing
+      nextNodes = commandRuntime.getActiveTaskGraph()?.getExecutableNodes() || [];
+    }
+  },
+
+  rollbackEngineeringCommand: () => {
+    const { commandRuntime } = get();
+    if (!commandRuntime) return;
+
+    try {
+      const revertedGraph = commandRuntime.rollbackAll();
+      get().commitTransaction(revertedGraph);
+
+      set({
+        commandRuntime: null,
+        taskNodes: [],
+        orchestrationProgress: null
+      });
+    } catch (e) {
+      console.error("Rollback error:", e);
+    }
+  },
+
+  getTaskStatus: () => {
+    const { commandRuntime } = get();
+    return commandRuntime ? commandRuntime.getOverallProgress() : null;
+  },
+
+  resumeFromCheckpoint: (checkpointId) => {
+    const { commandRuntime } = get();
+    if (!commandRuntime) return;
+
+    try {
+      const restoredGraph = commandRuntime.getCheckpointRuntime().restoreCheckpoint(checkpointId);
+      if (restoredGraph) {
+        // Reset node failures in the active task graph DAG to retry execution
+        commandRuntime.getActiveTaskGraph()?.getNodes().forEach(n => {
+          if (n.status === 'failed' || n.status === 'running') {
+            commandRuntime.getActiveTaskGraph()?.updateNodeStatus(n.id, 'pending');
+          }
+        });
+
+        get().commitTransaction(restoredGraph);
+        set({
+          taskNodes: commandRuntime.getActiveTaskGraph()?.getNodes() || [],
+          orchestrationProgress: commandRuntime.getOverallProgress()
+        });
+      }
+    } catch (e) {
+      console.error("Checkpoint restore error:", e);
+    }
+  },
+
   joinRoom: (roomName, userName) => {
     // Teardown stale sessions
     get().disconnectMultiplayer();
@@ -258,5 +396,33 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       client.disconnect();
     }
     set({ multiplayerClient: null, isConnected: false, presences: [], activeLocks: {} });
+  },
+
+  broadcastDelta: (subType, payload) => {
+    const client = get().multiplayerClient;
+    if (client) {
+      client.broadcastDelta(subType, payload);
+    }
+  },
+
+  applyRemoteDelta: (subType, payload) => {
+    if (subType === "graph_update" && payload.graph) {
+      get().commitTransaction(payload.graph, true);
+    }
   }
 }));
+
+export function useCollaborationStore() {
+  return useProjectStore((state) => ({
+    presences: state.presences,
+    activeLocks: state.activeLocks,
+    isConnected: state.isConnected,
+    joinRoom: state.joinRoom,
+    disconnectMultiplayer: state.disconnectMultiplayer,
+    broadcastPresenceCursor: state.broadcastPresenceCursor,
+    acquireLock: state.acquireLock,
+    releaseLock: state.releaseLock,
+    broadcastDelta: state.broadcastDelta,
+    applyRemoteDelta: state.applyRemoteDelta,
+  }));
+}
