@@ -1,5 +1,6 @@
 import { ProjectGraph, NetClass, DifferentialPair } from '../types';
 import { PCBBoard, BoardTrace, Via } from './board';
+import { ConstraintRuntime } from './constraints/constraintRuntime';
 
 // Deterministic constraints layer
 
@@ -171,6 +172,21 @@ export function resolveNetConstraints(board: PCBBoard, netId: string | undefined
 }
 
 export function validateConstraints(graph: ProjectGraph): string[] {
+  const runtime = new ConstraintRuntime(graph);
+  const conflicts = runtime.findConflicts();
+  const drcIssues = runtime.evaluateDRC(graph);
+  
   const issues: string[] = [];
+  conflicts.forEach((c: any) => issues.push(`[CONFLICT] ${c.message} (${c.resolutionHint})`));
+  drcIssues.forEach((i: any) => issues.push(`[DRC ${i.type.toUpperCase()}] ${i.message}`));
   return issues;
 }
+
+// Export modern unified constraints system layout
+export * from './constraints/constraintSchemas';
+export * from './constraints/constraintGraph';
+export * from './constraints/constraintResolver';
+export * from './constraints/constraintCompiler';
+export * from './constraints/constraintRuntime';
+export * from './constraints/constraintVisualization';
+

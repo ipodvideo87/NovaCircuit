@@ -11,16 +11,19 @@ import {
   Plus, 
   Share2, 
   Settings,
-  HelpCircle
+  HelpCircle,
+  Cloud,
+  Terminal
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 interface WorkspaceHeaderProps {
-  currentView: 'schematic' | 'pcb' | '3d' | 'mfg';
-  onViewChange: (view: 'schematic' | 'pcb' | '3d' | 'mfg') => void;
+  currentView: 'schematic' | 'pcb' | '3d' | 'mfg' | 'observability';
+  onViewChange: (view: 'schematic' | 'pcb' | '3d' | 'mfg' | 'observability') => void;
   onOpenShare?: () => void;
   onOpenSettings?: () => void;
   onOpenNewProject?: () => void;
+  onOpenCloudVault?: () => void;
 }
 
 export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
@@ -28,11 +31,21 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
   onViewChange,
   onOpenShare,
   onOpenSettings,
-  onOpenNewProject
+  onOpenNewProject,
+  onOpenCloudVault
 }) => {
   const isConnected = useProjectStore(state => state.isConnected);
   const presences = useProjectStore(state => state.presences);
   const multiplayerClient = useProjectStore(state => state.multiplayerClient);
+
+  // Authentication & Subscription state hooks
+  const user = useProjectStore(state => state.user);
+  const userProfile = useProjectStore(state => state.userProfile);
+  const requirePro = useProjectStore(state => state.requirePro);
+  const setPricingModalOpen = useProjectStore(state => state.setPricingModalOpen);
+  const isSaving = useProjectStore(state => state.isSaving);
+  const signIn = useProjectStore(state => state.signIn);
+  const signOut = useProjectStore(state => state.signOut);
 
   // Derive active designer details
   const activeCoDesignersCount = presences.length;
@@ -51,6 +64,14 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
       hash = userId.charCodeAt(i) + ((hash << 5) - hash);
     }
     return colors[Math.abs(hash) % colors.length];
+  };
+
+  const handleTabClick = (viewId: any) => {
+    if (viewId === 'mfg') {
+      const authorized = requirePro('export_manufacturing');
+      if (!authorized) return;
+    }
+    onViewChange(viewId);
   };
 
   return (
@@ -107,10 +128,11 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
           { id: 'pcb', label: 'Board Layout', icon: <Activity size={12} /> },
           { id: '3d', label: '3D Preview', icon: <Box size={12} /> },
           { id: 'mfg', label: 'Manufacturing', icon: <Sliders size={12} /> },
+          { id: 'observability', label: 'Telemetry HUD', icon: <Terminal size={12} /> },
         ].map((tab) => (
           <button
             key={tab.id}
-            onClick={() => onViewChange(tab.id as any)}
+            onClick={() => handleTabClick(tab.id as any)}
             className={cn(
               "flex items-center gap-1.5 px-3 py-1.5 text-[9px] font-black uppercase tracking-wider rounded-lg transition-all cursor-pointer",
               currentView === tab.id 
@@ -126,6 +148,64 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
 
       {/* Peer user avatars + operations buttons */}
       <div className="flex items-center gap-3">
+
+        {/* Freemium & Pro subscription status box */}
+        <div className="flex items-center gap-2 px-3 py-1 bg-white/[0.02] border border-white/5 rounded-xl text-[10px] shrink-0">
+          {user ? (
+            <div className="flex items-center gap-2">
+              {userProfile?.isAdmin ? (
+                <div className="flex items-center gap-1">
+                  <span className="py-0.5 px-1.5 bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 rounded font-black tracking-widest text-[8px] uppercase animate-pulse" title="Developer Unlimited Access Bypass Active">
+                    DEV UNLIMITED
+                  </span>
+                </div>
+              ) : userProfile?.isPro ? (
+                <div className="flex items-center gap-1">
+                  <span className="py-0.5 px-1.5 bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 rounded font-black tracking-widest text-[8px] uppercase animate-pulse">
+                    PRO
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <div className="flex flex-col text-right leading-none gap-0.5">
+                    <span className="text-[7.5px] text-amber-500 font-black uppercase tracking-wider">FREE WORKSPACE</span>
+                    <span className="text-[8px] text-gray-500 font-extrabold tracking-tighter">
+                      {userProfile?.aiActionsThisMonth || 0}/20 CO_ACTS
+                    </span>
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={() => setPricingModalOpen(true)}
+                    className="px-1.5 py-0.5 bg-amber-500 hover:bg-amber-400 text-black font-black text-[8px] uppercase tracking-wider rounded transition-all active:scale-95 cursor-pointer"
+                  >
+                    UPGRADE
+                  </button>
+                </div>
+              )}
+
+              {/* User Avatar Circle */}
+              <div 
+                title={`${user.email} - Double click to Sign Out`}
+                onDoubleClick={() => { if (window.confirm("Do you want to Sign Out?")) signOut(); }}
+                className="w-6 h-6 rounded-full overflow-hidden border border-indigo-500/25 flex items-center justify-center cursor-pointer select-none bg-indigo-950/50 font-black text-indigo-300 text-[9px]"
+              >
+                {user.photoURL ? (
+                  <img src={user.photoURL} alt="User" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                ) : (
+                  getInitials(user.displayName || user.email || '??')
+                )}
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => signIn()}
+              className="px-2 py-0.5 bg-indigo-600 hover:bg-indigo-500 text-white font-black text-[8px] uppercase tracking-wider rounded transition-all active:scale-95 cursor-pointer"
+            >
+              Sign In
+            </button>
+          )}
+        </div>
         
         {/* Collaborative Indicator Avatars Tray */}
         {isConnected && activeCoDesignersCount > 0 && (
@@ -161,7 +241,24 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
 
         {/* Functional header buttons */}
         <div className="flex items-center gap-2">
+          {isSaving && (
+            <div className="flex items-center gap-1.5 text-[8px] md:text-[9px] uppercase tracking-wider text-indigo-400 font-extrabold px-2.5 py-1.5 bg-indigo-500/5 border border-indigo-500/10 rounded-xl animate-pulse">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-500 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-indigo-600"></span>
+              </span>
+              <span>Auto-Syncing...</span>
+            </div>
+          )}
           
+          <button 
+            onClick={onOpenCloudVault}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#141418] hover:bg-indigo-600/10 hover:text-indigo-400 border border-white/5 rounded-xl text-[9px] font-bold uppercase cursor-pointer text-gray-400 transition-all active:scale-95"
+          >
+            <Cloud size={11} />
+            <span className="hidden md:inline">Cloud Vault</span>
+          </button>
+
           <button 
             onClick={onOpenNewProject}
             className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#141418] hover:bg-[#1a1a20] border border-white/5 rounded-xl text-[9px] font-bold uppercase cursor-pointer text-gray-400 hover:text-white transition-all active:scale-95"

@@ -117,19 +117,22 @@ export class CRDTEngine {
     const mergedNet: Net = {
       ...localNet,
       name: localNet.name || remoteNet.name,
-      properties: { ...localNet.properties, ...remoteNet.properties }
     };
+
+    if ((localNet as any).properties || (remoteNet as any).properties) {
+      (mergedNet as any).properties = { ...(localNet as any).properties, ...(remoteNet as any).properties };
+    }
 
     // Deduplicate and combine logical connections
     const connectionMap = new Map<string, typeof localNet.connections[number]>();
     
     localNet.connections.forEach(conn => {
-      const key = `${conn.componentId}.${conn.pinId}`;
+      const key = `${conn.componentId}.${conn.pinName}`;
       connectionMap.set(key, conn);
     });
 
     remoteNet.connections.forEach(conn => {
-      const key = `${conn.componentId}.${conn.pinId}`;
+      const key = `${conn.componentId}.${conn.pinName}`;
       if (!connectionMap.has(key)) {
         connectionMap.set(key, conn);
       }

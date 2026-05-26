@@ -4,6 +4,8 @@ import { TaskPlanner } from './taskPlanner';
 import { CheckpointRuntime, Checkpoint } from './checkpointRuntime';
 import { DesignIntentMemory } from './designIntentMemory';
 import { ProjectGraphModel } from '../core/graph';
+import { ConstraintCompiler } from '../constraints/constraintCompiler';
+import { ConstraintRuntime } from '../constraints/constraintRuntime';
 
 export interface CommandRuntimeStatus {
   completed: number;
@@ -53,6 +55,14 @@ export class EngineeringCommandRuntime {
     );
     this.baseRestorePointId = checkpoint.id;
 
+    // Compile high fidelity design constraints matching intent
+    const parsedConstraints = ConstraintCompiler.compileIntentToConstraints(goal);
+    if (parsedConstraints.length > 0) {
+      const cr = new ConstraintRuntime(this.activeGraph);
+      parsedConstraints.forEach(c => cr.addConstraint(c));
+      this.activeGraph = cr.serializeToGraph(this.activeGraph);
+    }
+
     // Plan DAG steps
     this.activeTaskGraph = this.planner.planEngineeringGoal(goal, {
       graph: this.activeGraph,
@@ -69,6 +79,27 @@ export class EngineeringCommandRuntime {
     });
 
     return this.activeTaskGraph;
+  }
+
+  /**
+   * High-level single-shot goal executor. Plans, initializes, and runs all stages of the goal to completion.
+   */
+  public async executeGoal(goal: string, preferredCenter?: { x: number; y: number }): Promise<{ success: boolean; graph: ProjectGraph }> {
+    this.initiateCommand(goal, preferredCenter);
+    let success = true;
+    let nextNodes = this.activeTaskGraph?.getExecutableNodes() || [];
+    while (nextNodes.length > 0) {
+      const stepResult = await this.stepExecution();
+      if (!stepResult.success) {
+        success = false;
+        break;
+      }
+      nextNodes = this.activeTaskGraph?.getExecutableNodes() || [];
+    }
+    return {
+      success,
+      graph: this.activeGraph
+    };
   }
 
   /**

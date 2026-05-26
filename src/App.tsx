@@ -5,8 +5,17 @@
 
 import { useEffect } from 'react';
 import SchematicEditor from './components/SchematicEditor';
+import PricingModal from './components/PricingModal';
+import { useProjectStore } from './lib/core/store';
 
 export default function App() {
+  const initAuthListener = useProjectStore(state => state.initAuthListener);
+
+  // Initialize Auth observation and context settings
+  useEffect(() => {
+    initAuthListener();
+  }, [initAuthListener]);
+
   // Prevent default context menu for a more native feel
   useEffect(() => {
     const handleContextMenu = (e: MouseEvent) => e.preventDefault();
@@ -17,6 +26,7 @@ export default function App() {
   return (
     <div className="w-full h-[100dvh] overflow-hidden bg-[#0a0a0a]">
       <SchematicEditor />
+      <PricingModal />
     </div>
   );
 }

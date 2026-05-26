@@ -18,6 +18,9 @@ import {
 } from 'lucide-react';
 import { GPUCanvas } from './GPUCanvas';
 import { ConstraintOverlayCanvas } from './ConstraintOverlayCanvas';
+import { AIAttentionOverlay } from './AIAttentionOverlay';
+import { PlacementPreviewGhosts } from './PlacementPreviewGhosts';
+import { RoutingPreviewOverlay } from './RoutingPreviewOverlay';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '@/src/lib/utils';
 import { ProjectGraph } from '../types';
@@ -300,6 +303,7 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
   const broadcastPresenceCursor = useProjectStore(state => state.broadcastPresenceCursor);
   const orchestrationProgress = useProjectStore(state => state.orchestrationProgress);
   const taskNodes = useProjectStore(state => state.taskNodes);
+  const requirePro = useProjectStore(state => state.requirePro);
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -473,6 +477,10 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
 
   const runBoardAutoRouter = useCallback(() => {
     if (isReadOnly || !onCommitTransaction) return;
+
+    const authorized = requirePro('auto_routing');
+    if (!authorized) return;
+
     setIsAutoRouting(true);
     setRoutingLogs(["Initializing browser-native A* multi-net search routing daemon...", "Reading copper layout clearances and board boundaries..."]);
     setRoutingStats({ routed: 0, failed: 0 });
@@ -1567,6 +1575,11 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
 
           {/* Ratsnest Lines */}
           <RatsnestLayer board={board} processScale={processScale} isElementVisible={isElementVisible} />
+
+          {/* AI Attention Focus, Placement Ghosts and Routing Live preview indicators */}
+          <AIAttentionOverlay />
+          <PlacementPreviewGhosts />
+          <RoutingPreviewOverlay />
         </motion.div>
 
         {/* PCB Toolbar */}

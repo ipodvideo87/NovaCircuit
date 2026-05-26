@@ -372,22 +372,22 @@ export default function ManufacturingHUD() {
 
   const handleExportBOM = () => {
     const csv = generateBOMCSV(board);
-    processDownload(`${graph.name || 'project'}_BOM_Revision_1.0.csv`, csv, 'text/csv');
+    processDownload(`${(graph as any).name || 'project'}_BOM_Revision_1.0.csv`, csv, 'text/csv');
   };
 
   const handleExportCPL = () => {
     const csv = generatePickAndPlaceCSV(board);
-    processDownload(`${graph.name || 'project'}_CPL_PickPlace.csv`, csv, 'text/csv');
+    processDownload(`${(graph as any).name || 'project'}_CPL_PickPlace.csv`, csv, 'text/csv');
   };
 
   const handleExportNC = () => {
     const drill = generateExcellonDrill(board);
-    processDownload(`${graph.name || 'project'}_NC_Drill.drl`, drill, 'text/plain');
+    processDownload(`${(graph as any).name || 'project'}_NC_Drill.drl`, drill, 'text/plain');
   };
 
   const handleExportIPC = () => {
     const ip = generateIPCD356Netlist(board);
-    processDownload(`${graph.name || 'project'}_IPC-D-356.net`, ip, 'text/plain');
+    processDownload(`${(graph as any).name || 'project'}_IPC-D-356.net`, ip, 'text/plain');
   };
 
   const handleExportAll = () => {
@@ -412,7 +412,7 @@ export default function ManufacturingHUD() {
         const url = URL.createObjectURL(content);
         const link = document.createElement('a');
         link.href = url;
-        link.download = `${graph.name || 'project'}_full_manufacturing_pack.zip`;
+        link.download = `${(graph as any).name || 'project'}_full_manufacturing_pack.zip`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);

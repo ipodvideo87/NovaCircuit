@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "Project": {
+      "title": "Project",
+      "description": "A collaborative EDA schematic and board layout design",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique ID of the project" },
+        "name": { "type": "string", "description": "The name of the project" },
+        "ownerId": { "type": "string", "description": "UID of the project owner" },
+        "ownerEmail": { "type": "string", "description": "Email of the project owner" },
+        "componentsCount": { "type": "integer", "description": "Count of components" },
+        "tracesCount": { "type": "integer", "description": "Count of trace segments" },
+        "isPublic": { "type": "boolean", "description": "Public visibility flag" },
+        "graph": { "type": "object", "description": "The JSON-serializable ProjectGraph data shape" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last modification timestamp" }
+      },
+      "required": ["name", "ownerId", "ownerEmail", "graph", "createdAt", "updatedAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Tracks freemium tiers, limits, and Stripe metadata",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "User identifier matches auth UID" },
+        "isPro": { "type": "boolean", "description": "Is active Paid Professional member" },
+        "aiActionsThisMonth": { "type": "integer", "description": "AI operations conducted this billing cycle" },
+        "boardsThisMonth": { "type": "integer", "description": "Complex board files initialized" },
+        "stripeCustomerId": { "type": "string", "description": "Stripe identity for pro sync" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Check sync time" }
+      },
+      "required": ["uid", "isPro", "aiActionsThisMonth", "boardsThisMonth"]
+    }
+  },
+  "firestore": {
+    "projects/{projectId}": {
+      "schema": "Project",
+      "description": "Saves collaborative user projects with schemas, copper segments, constraints, and routes"
+    },
+    "users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Tracks subscription level, limits, and usage counts"
+    }
+  }
+}

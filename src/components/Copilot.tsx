@@ -62,7 +62,9 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
     stepEngineeringStage,
     runAllEngineeringStages,
     rollbackEngineeringCommand,
-    resumeFromCheckpoint
+    resumeFromCheckpoint,
+    requirePro,
+    incrementAIActionCount
   } = useProjectStore();
 
   const [messages, setMessages] = useState<Message[]>([
@@ -121,7 +123,20 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
                     gLower.includes('usb-c pd') || gLower.includes('usb pd') || gLower.includes('power delivery') ||
                     gLower.includes('clock distribution') || gLower.includes('si5338') || gLower.includes('shielding');
 
+    // Check basic copilot usage authorization
+    if (!requirePro('ai_action')) {
+      setIsTyping(false);
+      setCurrentTask('');
+      return;
+    }
+
     if (isMacro) {
+      if (!requirePro('advanced_macro')) {
+        setIsTyping(false);
+        setCurrentTask('');
+        return;
+      }
+
       setCurrentTask('Instantiating Hierarchical task planner...');
       await new Promise(r => setTimeout(r, 450));
       
@@ -134,6 +149,9 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
       };
       setMessages(prev => [...prev, assistantMessage]);
       setIsTyping(false);
+      setCurrentTask('');
+      // Macro executes as a valid copilot action, increment the counter
+      await incrementAIActionCount();
       return;
     }
 
@@ -190,6 +208,8 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
         console.log("=== COMMITTING COMPILED ACTIONS ===", JSON.stringify(compiled.executableActions, null, 2));
         onAiAction(compiled.executableActions, data.content || "");
       }
+
+      await incrementAIActionCount();
     } catch (error) {
       console.error("AI Compiler Error:", error);
       setMessages(prev => [...prev, {

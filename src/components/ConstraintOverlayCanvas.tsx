@@ -6,6 +6,7 @@ import { ThermalOverlayAnalyzer, ThermalSimulationResult } from '../lib/drc/ther
 import { SignalIntegrityOverlayAnalyzer, SignalIntegrityData, SkewHighlight, ImpedanceMismatch, EMIRiskPoint } from '../lib/drc/signalIntegrityOverlay';
 import { OverlayRenderer, OverlayConfig } from '../lib/rendering/overlayRenderer';
 import { Shield, Flame, Activity, HelpCircle, Sparkles, Cpu, AlertTriangle, X, Check, Eye, EyeOff } from 'lucide-react';
+import { ConstraintRuntime } from '../lib/constraints/constraintRuntime';
 
 interface ConstraintOverlayCanvasProps {
   graph: ProjectGraph;
@@ -47,6 +48,16 @@ export const ConstraintOverlayCanvas: React.FC<ConstraintOverlayCanvasProps> = (
   const [panelOpen, setPanelOpen] = useState(true);
 
   // 1. ANCHOR CRITICAL INSTANTIATIONS
+  const constraints = useMemo(() => {
+    try {
+      const cr = new ConstraintRuntime(graph);
+      return cr.getGraph().getAllConstraints();
+    } catch (e) {
+      console.error(e);
+      return [];
+    }
+  }, [graph]);
+
   const visualizer = useMemo(() => new ConstraintVisualizer(), []);
   const thermalAnalyzer = useMemo(() => new ThermalOverlayAnalyzer(), []);
   const siAnalyzer = useMemo(() => new SignalIntegrityOverlayAnalyzer(), []);
@@ -425,6 +436,37 @@ export const ConstraintOverlayCanvas: React.FC<ConstraintOverlayCanvasProps> = (
                 </div>
                 {config.showEmiRisks ? <Eye size={10} /> : <EyeOff size={10} />}
               </button>
+            </div>
+
+            {/* Live Constraints Ledger Section */}
+            <div className="space-y-2 text-[9px] border-t border-white/10 pt-3">
+              <div className="text-gray-400 text-[8px] tracking-wider font-extrabold uppercase mb-1">ACTIVE CONSTRAINTS LEDGER ({constraints.length})</div>
+              {constraints.length === 0 ? (
+                <div className="text-gray-500 font-sans italic text-[8.5px] p-2 bg-white/5 rounded">No custom constraints specified. Falling back to default spacing specs.</div>
+              ) : (
+                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                  {constraints.map((c) => (
+                    <div key={c.id} className="bg-neutral-900 border border-white/5 p-1.5 rounded-lg flex items-start justify-between gap-1 leading-snug">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1 flex-wrap">
+                          <span className="font-extrabold text-blue-400 uppercase text-[7px] tracking-wider shrink-0">{c.type}</span>
+                          <span className="text-[6.5px] text-gray-500 bg-white/5 px-1 rounded shrink-0">{c.scope}</span>
+                        </div>
+                        <div className="text-[7.5px] text-gray-300 truncate font-sans mt-0.5">
+                          {c.target ? `Target: ${c.target}` : 'Global Scale'}
+                        </div>
+                        <div className="text-[7px] text-gray-400 truncate font-sans italic mt-0.5" title={c.description}>
+                          {c.description || 'Verified engineering target override.'}
+                        </div>
+                      </div>
+                      <div className="flex flex-col items-end gap-1 shrink-0 text-right">
+                        <span className="text-[7px] font-black text-rose-400">P:{c.priority}</span>
+                        <span className="text-[6px] bg-white/5 text-gray-400 px-1 rounded uppercase font-black">{c.source}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* AI Assistant suggestions integrated workspace */}

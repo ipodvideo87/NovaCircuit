@@ -78,8 +78,14 @@ import { useTransactionManager, deepCloneGraph } from '../lib/transaction';
 import { useProjectStore } from '../lib/core/store';
 import { MultiplayerCursors } from './MultiplayerCursors';
 import { WorkspaceHeader } from './WorkspaceHeader';
+import { ExecutionInspector } from './ExecutionInspector';
+import { ReplayTimeline } from './ReplayTimeline';
+import { ConstraintInspector } from './ConstraintInspector';
+import { AILiveExecutionHUD } from './AILiveExecutionHUD';
+import { ExecutionProgressTimeline } from './ExecutionProgressTimeline';
 import ManufacturingHUD from './ManufacturingHUD';
-import { Users, Wifi, WifiOff } from 'lucide-react';
+import { CloudProjectsPanel } from './CloudProjectsPanel';
+import { Users, Wifi, WifiOff, RotateCcw } from 'lucide-react';
 import { runSystemRegressionSuite } from '../lib/testHarness';
 import { runERC, ERCIssue } from '../lib/erc';
 import { resolveNetDrivers, NetDriverReport } from '../lib/netDriver';
@@ -509,7 +515,7 @@ const initialEdges = [
   { id: 'e1-2', source: '2', target: '1', animated: true, style: { stroke: '#6366f1' } }
 ];
 
-type EditorView = 'schematic' | 'pcb' | '3d' | 'mfg';
+type EditorView = 'schematic' | 'pcb' | '3d' | 'mfg' | 'observability';
 
 export function useReplayEngine(tracesRef: React.MutableRefObject<AIExecutionTrace[]>) {
   const [replayIndex, setReplayIndex] = useState<number | null>(null);
@@ -831,11 +837,13 @@ export default function SchematicEditor() {
 
   const lastInteractionTime = useRef<number>(0);
   const [activeModal, setActiveModal] = useState<'bom' | 'share' | 'settings' | 'new_project' | null>(null);
+  const [showCloudVault, setShowCloudVault] = useState(false);
   const [touchMode, setTouchMode] = useState<'pan' | 'edit'>('edit');
   const [copied, setCopied] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
   const flowInstanceRef = useRef<any>(null);
+  const reactFlowWrapperRef = useRef<HTMLDivElement>(null);
   const [nudgeMode, setNudgeMode] = useState(false);
   const [isEditingValue, setIsEditingValue] = useState(false);
   const [editVal, setEditVal] = useState('');
@@ -936,17 +944,6 @@ export default function SchematicEditor() {
     setStoreGraph(activeGraph);
   }, [activeGraph, setStoreGraph]);
 
-  // Synchronize incoming remote peer edits into the local transaction manager
-  const storeGraph = useProjectStore(state => state.graph);
-  useEffect(() => {
-    const activeStr = JSON.stringify(transientActiveGraph);
-    const storeStr = JSON.stringify(storeGraph);
-    if (activeStr !== storeStr) {
-      commitTransaction(storeGraph);
-      applyGraphToEditor(storeGraph);
-    }
-  }, [storeGraph, transientActiveGraph, commitTransaction, applyGraphToEditor]);
-
   // Collaborative Multiplayer State & Setup Hook
   const isConnected = useProjectStore(state => state.isConnected);
   const presences = useProjectStore(state => state.presences);
@@ -956,6 +953,11 @@ export default function SchematicEditor() {
   const broadcastPresenceCursor = useProjectStore(state => state.broadcastPresenceCursor);
   const orchestrationProgress = useProjectStore(state => state.orchestrationProgress);
   const taskNodes = useProjectStore(state => state.taskNodes);
+  const executeEngineeringCommand = useProjectStore(state => state.executeEngineeringCommand);
+  const stepEngineeringStage = useProjectStore(state => state.stepEngineeringStage);
+  const runAllEngineeringStages = useProjectStore(state => state.runAllEngineeringStages);
+  const rollbackEngineeringCommand = useProjectStore(state => state.rollbackEngineeringCommand);
+  const requirePro = useProjectStore(state => state.requirePro);
 
   const [multiplayerRoom, setMultiplayerRoom] = useState("flux-main-sandbox");
   const [multiplayerUserName, setMultiplayerUserName] = useState(() => `Designer_${Math.floor(Math.random() * 90) + 10}`);
@@ -1115,6 +1117,17 @@ export default function SchematicEditor() {
       });
     });
   }, [setNodes, setEdges]);
+
+  // Synchronize incoming remote peer edits into the local transaction manager
+  const storeGraph = useProjectStore(state => state.graph);
+  useEffect(() => {
+    const activeStr = JSON.stringify(transientActiveGraph);
+    const storeStr = JSON.stringify(storeGraph);
+    if (activeStr !== storeStr) {
+      commitTransaction(storeGraph);
+      applyGraphToEditor(storeGraph);
+    }
+  }, [storeGraph, transientActiveGraph, commitTransaction, applyGraphToEditor]);
 
   const handleAiActionsDeps = useRef({ applyGraphToEditor, commitTransaction, rollback, exitReplay });
   useEffect(() => {
@@ -1400,15 +1413,15 @@ export default function SchematicEditor() {
     }
   }, [displayNodes]);
 
-  const handleQuickInsert = useCallback((part: { name: string, isPrimitive: boolean, label?: string, partType?: string, partNumber?: string, tag?: string }) => {
+  const handleQuickInsert = useCallback((part: { name: string, isPrimitive: boolean, label?: string, partType?: string, partNumber?: string, tag?: string }, overridePos?: { x: number; y: number }) => {
     if (!canInteract('add_primitive')) return;
     const prefix = part.name;
     let idx = 1;
     while (activeGraph.components.some(c => c.id === `${prefix}${idx}`)) {
       idx++;
     }
-    const spawnX = 150 + (activeGraph.components.length % 5) * 35;
-    const spawnY = 150 + Math.floor(activeGraph.components.length / 5) * 35;
+    const spawnX = overridePos?.x ?? (150 + (activeGraph.components.length % 5) * 35);
+    const spawnY = overridePos?.y ?? (150 + Math.floor(activeGraph.components.length / 5) * 35);
 
     if (part.isPrimitive) {
       handleAiActions([
@@ -1640,8 +1653,9 @@ export default function SchematicEditor() {
       onOpenShare={() => setActiveModal('share')}
       onOpenSettings={() => setActiveModal('settings')}
       onOpenNewProject={() => { if (canInteract('new_project')) { setActiveModal('new_project'); } }}
+      onOpenCloudVault={() => setShowCloudVault(true)}
     />
-  ), [view, isMobile, canInteract, handleSetView]);
+  ), [view, isMobile, canInteract, handleSetView, showCloudVault]);
 
   const leftSidebar = useMemo(() => (
         <aside className={cn(
@@ -1684,6 +1698,41 @@ export default function SchematicEditor() {
 
            {activeTab === 'library' ? (
              <div className="flex-1 overflow-y-auto p-2 space-y-6 scrollbar-hide">
+               {/* AI Automation Macros section */}
+               <section className="p-3 border border-purple-500/25 bg-purple-500/5 rounded-xl space-y-2 mb-1">
+                 <div className="flex items-center gap-1.5 pb-1 border-b border-purple-500/10">
+                   <Sparkles size={11} className="text-purple-400 animate-pulse" />
+                   <h3 className="text-[9px] text-purple-300 uppercase tracking-[0.2em] font-black">AI Orchestration Macros</h3>
+                 </div>
+                 <div className="grid grid-cols-1 gap-1.5">
+                   {[
+                     { label: "ESP32 Subsystem Block", cmd: "Add ESP32 subsystem", desc: "SoC + Voltage Regulators" },
+                     { label: "Route USB Diff Pair (90Ω)", cmd: "Route USB diff pair", desc: "Differential Impedance matching" },
+                     { label: "Add Buck Converter Control", cmd: "Add Buck Regulator Subsystem", desc: "DC-DC power management" }
+                   ].map((macro) => (
+                     <button
+                       key={macro.cmd}
+                       type="button"
+                       onClick={() => {
+                         if (!requirePro('advanced_macro')) return;
+                         executeEngineeringCommand(macro.cmd);
+                         setDrcWarnings(prev => [
+                           `INFO: Executing hierarchical planner for command: "${macro.cmd}"...`,
+                           ...prev
+                         ].slice(0, 5));
+                       }}
+                       className="p-1.5 text-left bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/25 hover:border-purple-500/40 rounded-lg transition-all active:scale-95 cursor-pointer"
+                     >
+                       <div className="text-[10px] text-zinc-200 font-extrabold flex items-center gap-1">
+                         <Zap size={9} className="text-purple-400" />
+                         {macro.label}
+                       </div>
+                       <div className="text-[8px] text-zinc-400 mt-0.5 leading-none">{macro.desc}</div>
+                     </button>
+                   ))}
+                 </div>
+               </section>
+
                <section>
                  <div className="flex items-center justify-between px-2 mb-3">
                    <h3 className="text-[9px] text-zinc-600 uppercase tracking-[0.2em] font-black">AI Components</h3>
@@ -1692,6 +1741,17 @@ export default function SchematicEditor() {
                    {filteredAiComponents.map((part, i) => (
                      <div 
                        key={i} 
+                       draggable={true}
+                       onDragStart={(e) => {
+                         const prefix = part.name.includes('STM') ? 'U' : part.name.includes('BQ') ? 'U' : 'PWR';
+                         e.dataTransfer.setData('application/reactflow-data', JSON.stringify({
+                           name: prefix,
+                           isPrimitive: false,
+                           partNumber: part.partNumber,
+                           label: part.name
+                         }));
+                         e.dataTransfer.effectAllowed = 'move';
+                       }}
                        onClick={() => {
                          if (!canInteract('add_part')) return;
                          const prefix = part.name.includes('STM') ? 'U' : part.name.includes('BQ') ? 'U' : 'PWR'; handleQuickInsert({ name: prefix, isPrimitive: false, partNumber: part.partNumber, label: part.name }); return;
@@ -1738,6 +1798,16 @@ export default function SchematicEditor() {
                    {filteredPrimitives.map((part, i) => (
                      <div 
                        key={i} 
+                       draggable={true}
+                       onDragStart={(e) => {
+                         e.dataTransfer.setData('application/reactflow-data', JSON.stringify({
+                           name: part.name,
+                           isPrimitive: true,
+                           partType: part.partType,
+                           label: part.name
+                         }));
+                         e.dataTransfer.effectAllowed = 'move';
+                       }}
                        onClick={() => {
                          handleQuickInsert({ name: part.name, isPrimitive: true, partType: part.partType, label: part.name }); return;
                          const prefix = part.name;
@@ -1917,7 +1987,12 @@ export default function SchematicEditor() {
                       {[
                         { icon: <MousePointer2 size={16}/>, id: 'select', action: () => { exitReplay(); setTraceInspectorOpen(false); } },
                         { icon: <CircuitBoard size={16}/>, id: 'add', action: () => { setDrcWarnings(prev => ["INFO: Place mode active. Select primitives or smart integrated circuits from the left Inventory sidebar.", ...prev].slice(0, 5)); } },
-                        { icon: <Activity size={16}/>, id: 'simulate', action: () => { setDrcWarnings(prev => ["SUCCESS: Reactive simulation model synchronized. Waveforms update real-time.", ...prev].slice(0, 5)); } },
+                        { icon: <Activity size={16}/>, id: 'simulate', action: () => {
+                            const authorized = requirePro('active_live_preview');
+                            if (!authorized) return;
+                            setDrcWarnings(prev => ["SUCCESS: Reactive simulation model synchronized. Waveforms update real-time.", ...prev].slice(0, 5));
+                          }
+                        },
                         { icon: <Play size={16}/>, id: 'replay', action: () => { if (executionTraces.current.length > 0) goToStep(0); else setDrcWarnings(prev => ["WARN: No active execution traces available to replay yet.", ...prev].slice(0, 5)); } },
                         { icon: <List size={16}/>, id: 'trace_inspector', action: () => setTraceInspectorOpen(!traceInspectorOpen) }
                       ].map((tool, i) => {
@@ -2652,20 +2727,44 @@ export default function SchematicEditor() {
 
             {/* View Switcher Panel (Visible across all views on Desktop, hidden on Mobile in favor of bottom nav tabs) */}
             {!isMobile && (
-              <div className="absolute top-4 right-4 bg-[#0d0d0d]/90 backdrop-blur border border-white/10 rounded-xl p-1 flex gap-1 shadow-2xl z-30 font-sans">
-                {['SCHEMATIC', 'PCB', '3D'].map((v) => (
-                  <button 
-                    id={`view-switch-${v.toLowerCase()}`}
-                    key={v}
-                    onClick={() => handleSetView(v.toLowerCase() as EditorView)}
-                    className={cn(
-                      "p-1.5 px-3 text-[9px] md:text-[10px] font-black rounded-lg transition-all uppercase tracking-widest cursor-pointer",
-                      view === v.toLowerCase() ? "text-white bg-indigo-600 shadow-lg shadow-indigo-600/30" : "text-gray-500 hover:text-gray-300"
-                    )}
+              <div className="absolute top-4 right-4 flex items-center gap-1.5 z-30 font-sans">
+                {view === 'schematic' && (
+                  <button
+                    onClick={() => {
+                      const ercResults = runERC(activeGraph);
+                      const warningCount = ercResults.filter(r => r.severity === 'warning' || r.severity === 'error').length;
+                      
+                      setDrcWarnings(prev => [
+                        `SUCCESS: Bidirectional Netlist Sync complete! Committed ${activeGraph.components.length} footprints and ${activeGraph.nets.length} nets.`,
+                        warningCount > 0 ? `WARN: ERC check flag — ${warningCount} electrical issues found.` : "SUCCESS: ERC compliance scan 100% clean.",
+                        ...prev
+                      ].slice(0, 5));
+                      
+                      handleSetView('pcb');
+                    }}
+                    className="p-1.5 px-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20 text-[9px] md:text-[10px] font-black rounded-lg transition-all uppercase tracking-widest cursor-pointer flex items-center gap-1.5 animate-pulse shadow-xl"
+                    title="Translate schematic netlist into physical PCB copper tracks"
                   >
-                    {v}
+                    <Network size={11} className="text-emerald-400 animate-spin-slow" />
+                    Sync to PCB
                   </button>
-                ))}
+                )}
+                
+                <div className="bg-[#0d0d0d]/90 backdrop-blur border border-white/10 rounded-xl p-1 flex gap-1 shadow-2xl">
+                  {['SCHEMATIC', 'PCB', '3D', 'MFG', 'OBSERVABILITY'].map((v) => (
+                    <button 
+                      id={`view-switch-${v.toLowerCase()}`}
+                      key={v}
+                      onClick={() => handleSetView(v.toLowerCase() as EditorView)}
+                      className={cn(
+                        "p-1.5 px-3 text-[9px] md:text-[10px] font-black rounded-lg transition-all uppercase tracking-widest cursor-pointer",
+                        view === v.toLowerCase() ? "text-white bg-indigo-600 shadow-lg shadow-indigo-600/30" : "text-gray-500 hover:text-gray-300"
+                      )}
+                    >
+                      {v}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
 
@@ -2673,6 +2772,7 @@ export default function SchematicEditor() {
               {view === 'schematic' ? (
                 <motion.div 
                   key="schematic"
+                  ref={reactFlowWrapperRef}
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
@@ -2682,6 +2782,35 @@ export default function SchematicEditor() {
                     const x = e.clientX - bounds.left;
                     const y = e.clientY - bounds.top;
                     broadcastPresenceCursor(x, y);
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    if (e.dataTransfer) {
+                      e.dataTransfer.dropEffect = 'move';
+                    }
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (!canInteract('add_part')) return;
+                    if (!reactFlowWrapperRef.current || !flowInstanceRef.current) return;
+                    
+                    const rawData = e.dataTransfer.getData('application/reactflow-data');
+                    if (!rawData) return;
+                    
+                    try {
+                      const data = JSON.parse(rawData);
+                      
+                      // Convert absolute mouse events to the flow diagram coordinate space
+                      const bounds = reactFlowWrapperRef.current.getBoundingClientRect();
+                      const position = flowInstanceRef.current.screenToFlowPosition({
+                        x: e.clientX,
+                        y: e.clientY
+                      });
+                      
+                      handleQuickInsert(data, position);
+                    } catch (err) {
+                      console.error('Dnd drop event error:', err);
+                    }
                   }}
                 >
                     <ReactFlow
@@ -2738,6 +2867,38 @@ export default function SchematicEditor() {
                               }`}>{node.status}</span>
                             </div>
                           ))}
+                        </div>
+                        <div className="flex gap-1.5 border-t border-white/10 pt-2.5 mt-0.5">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (!requirePro('complex_stages')) return;
+                              await runAllEngineeringStages();
+                            }}
+                            className="flex-1 py-1 px-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 transition text-[9px] font-black uppercase tracking-wider text-white rounded-lg flex items-center justify-center gap-1 cursor-pointer"
+                          >
+                            <Play size={8} /> Deploy All
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await stepEngineeringStage();
+                            }}
+                            className="flex-1 py-1 px-1.5 bg-white/5 hover:bg-white/10 active:scale-95 transition text-[9px] font-black uppercase tracking-wider text-zinc-300 rounded-lg flex items-center justify-center gap-1 cursor-pointer"
+                          >
+                            <Zap size={8} /> Step
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              rollbackEngineeringCommand();
+                              setDrcWarnings(prev => [`INFO: User requested rollback of AI engine command transactions.`, ...prev].slice(0, 5));
+                            }}
+                            className="py-1 px-1.5 bg-rose-950/30 hover:bg-rose-950/50 transition text-[9px] font-black uppercase tracking-wider text-rose-400 rounded-lg flex items-center justify-center gap-1 cursor-pointer"
+                            title="Rollback all mutations"
+                          >
+                            <RotateCcw size={8} /> Undo
+                          </button>
                         </div>
                       </Panel>
                     )}
@@ -3017,6 +3178,26 @@ export default function SchematicEditor() {
                       <h2 className="text-xl font-black uppercase tracking-[0.3em] text-white">Flux 3D Engine</h2>
                       <p className="text-[10px] text-indigo-400 font-bold uppercase tracking-widest opacity-60">High Resolution WebGL Rasterization...</p>
                     </div>
+                  </div>
+                </motion.div>
+              ) : view === 'observability' ? (
+                <motion.div 
+                  key="observability" 
+                  className="w-full h-full bg-[#040406] overflow-y-auto p-4 flex flex-col gap-4 scrollbar-hide"
+                  initial={{ opacity: 0 }} 
+                  animate={{ opacity: 1 }} 
+                  exit={{ opacity: 0 }}
+                >
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 shrink-0">
+                    <AILiveExecutionHUD />
+                    <ExecutionProgressTimeline />
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 shrink-0">
+                    <ReplayTimeline />
+                  </div>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 flex-1 min-h-0">
+                    <ExecutionInspector />
+                    <ConstraintInspector />
                   </div>
                 </motion.div>
               ) : (
@@ -3338,6 +3519,12 @@ export default function SchematicEditor() {
           </div>
         )}
       </AnimatePresence>
+      {showCloudVault && (
+        <CloudProjectsPanel 
+          onClose={() => setShowCloudVault(false)} 
+          applyGraphToEditor={applyGraphToEditor}
+        />
+      )}
     </div>
   );
 }
