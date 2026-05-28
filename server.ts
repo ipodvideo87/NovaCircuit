@@ -44,7 +44,7 @@ EXPERT PROTOCOL:
 3. EXECUTE: Call multiple tools in a single response to build functional blocks.
 4. VERIFY: Proactively run_erc and run_drc after changes.
 
-Remember: Flux is about speed AND accuracy. Make the user's life easier by handling the 'boring' wiring and DRC checks automatically.`;
+Remember: NovaCircuit is about speed AND accuracy. Make the user's life easier by handling the 'boring' wiring and DRC checks automatically.`;
 
 // API routes for AI communication
 app.post("/api/copilot", async (req, res) => {
@@ -63,41 +63,36 @@ app.post("/api/copilot", async (req, res) => {
     const tools = [{ functionDeclarations: allTools }];
     const systemInstruction = FLUX_SYSTEM_INSTRUCTION;
 
-    const model = {
-      generateContent: async (args: any) => {
-        const res = await ai.models.generateContent({
-           model: "gemini-3-flash-preview",
-           contents: args.contents,
-           config: { tools: args.tools, systemInstruction: args.systemInstruction }
-        });
-        return {
-          response: {
-            functionCalls: (res as any).functionCalls,
-            text: () => (res as any).text
-          }
-        };
+    const result = await ai.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents,
+      config: {
+        tools,
+        systemInstruction
       }
-    };
+    });
 
-    const result = await model.generateContent({ contents, tools, systemInstruction });
-    const functionCalls = result.response.functionCalls || [];
+    const rawFunctionCalls: any[] = (result as any).functionCalls || [];
+    const textContent: string = (result as any).text || "";
 
-    const actions = functionCalls.map((call: any) => ({
-      action: call.name,
-      params: call.args
+    // Map function calls into structured actions
+    const actions = rawFunctionCalls.map((call: any) => ({
+      name: call.name,
+      args: call.args || {}
     }));
 
-    if (actions.length === 0) {
+    // If no function calls, return as a plain message action
+    if (actions.length === 0 && textContent) {
       actions.push({
-        action: "message",
-        params: { text: result.response.text() }
+        name: "message",
+        args: { text: textContent }
       });
     }
 
-    res.json({ actions });
+    res.json({ actions, content: textContent });
   } catch (error) {
     console.error("AI Error:", error);
-    res.status(500).json({ error: "Flux Core critical shutdown. Power cycle node." });
+    res.status(500).json({ error: "Nova AI encountered an error. Please check your API key or try again.", detail: String(error) });
   }
 });
 
