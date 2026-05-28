@@ -146,7 +146,7 @@ export const CloudProjectsPanel: React.FC<CloudProjectsPanelProps> = ({
       id: docId,
       name: saveName.trim(),
       ownerId: currentUser.uid,
-      ownerEmail: currentUser.email || 'collaborator@firsteda.io',
+      ownerEmail: currentUser.email || 'collaborator@novacircuit.io',
       componentsCount: currentGraph.components?.length || 0,
       tracesCount: currentGraph.traces?.length || 0,
       isPublic: isPublic,

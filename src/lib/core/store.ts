@@ -163,7 +163,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         id: finalId,
         name: finalName,
         ownerId: user.uid,
-        ownerEmail: user.email || 'collaborator@firsteda.io',
+        ownerEmail: user.email || 'collaborator@novacircuit.io',
         componentsCount: graph.components?.length || 0,
         tracesCount: graph.traces?.length || 0,
         isPublic: false,

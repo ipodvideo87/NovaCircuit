@@ -25,8 +25,8 @@ const ai = new GoogleGenAI({
 });
 
 // SYSTEM PROMPT configuration
-const FLUX_SYSTEM_INSTRUCTION = `You are 'Flux Master Expert', the ultimate AI Hardware Engineering Agent, modeled after the real Flux.ai Copilot.
-You represent the full intelligence of Flux.ai—the browser-based, AI-native eCAD platform.
+const FLUX_SYSTEM_INSTRUCTION = `You are 'Nova', the AI Hardware Engineering Agent for NovaCircuit — a browser-based, AI-native eCAD platform.
+You represent the full intelligence of NovaCircuit's AI-assisted design system.
 
 YOUR CORE IDENTITY:
 - GRAPH-BASED REASONING: Treat hardware as a RELATIONSHIP GRAPH where every component, pin, and net is a vertex or edge.

@@ -19,8 +19,10 @@ import {
   Play,
   Pause,
   RotateCcw,
-  BadgeInfo
+  BadgeInfo,
+  X
 } from 'lucide-react';
+import { AIActionConfirm } from './AIActionConfirm';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '@/src/lib/utils';
 import { ProjectGraph, AIAction } from '../types';
@@ -70,13 +72,14 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
   const [messages, setMessages] = useState<Message[]>([
     { 
       role: 'assistant', 
-      content: "Engineering Agent initialized. Project graph loaded. I'm ready to assist with your hardware design. What are we building?", 
+      content: "Nova AI initialized. Project graph loaded. I'm ready to assist with your hardware design — and I'll always show you the credit cost before running any action. What are we building?", 
       timestamp: new Date() 
     }
   ]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [currentTask, setCurrentTask] = useState<string>('');
+  const [pendingConfirm, setPendingConfirm] = useState<{ prompt: string; resolve: (confirmed: boolean) => void } | null>(null);
   const [activeMessageTabs, setActiveMessageTabs] = useState<Record<number, string>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -95,6 +98,13 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
     }
   }, [messages, isTyping]);
 
+  // Show the confirmation dialog and wait for user response
+  const requestConfirmation = (prompt: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      setPendingConfirm({ prompt, resolve });
+    });
+  };
+
   const handleSend = async () => {
     if (!input.trim() || isTyping) return;
 
@@ -108,8 +118,6 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
     setMessages(newMessages);
     const originalInput = input;
     setInput('');
-    setIsTyping(true);
-    setCurrentTask('Compiling natural language intent...');
 
     const gLower = originalInput.toLowerCase();
     const isMacro = gLower.includes('esp32') || gLower.includes('buck') || gLower.includes('converter') || 
@@ -123,12 +131,17 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
                     gLower.includes('usb-c pd') || gLower.includes('usb pd') || gLower.includes('power delivery') ||
                     gLower.includes('clock distribution') || gLower.includes('si5338') || gLower.includes('shielding');
 
-    // Check basic copilot usage authorization
+    // Check basic copilot usage authorization BEFORE showing confirm dialog
     if (!requirePro('ai_action')) {
-      setIsTyping(false);
-      setCurrentTask('');
       return;
     }
+
+    // Show credit confirmation dialog — no silent charges ever
+    const confirmed = await requestConfirmation(originalInput);
+    if (!confirmed) return;
+
+    setIsTyping(true);
+    setCurrentTask('Compiling natural language intent...');
 
     if (isMacro) {
       if (!requirePro('advanced_macro')) {
@@ -250,6 +263,24 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
 
   return (
     <div className="flex flex-col h-full bg-[#050505] text-gray-200 border-l border-white/5 shadow-2xl relative overflow-hidden font-mono">
+      {/* Transparent AI Credit Confirmation Dialog */}
+      <AIActionConfirm
+        isOpen={!!pendingConfirm}
+        prompt={pendingConfirm?.prompt || ''}
+        creditCost={1}
+        onConfirm={() => {
+          if (pendingConfirm) {
+            pendingConfirm.resolve(true);
+            setPendingConfirm(null);
+          }
+        }}
+        onCancel={() => {
+          if (pendingConfirm) {
+            pendingConfirm.resolve(false);
+            setPendingConfirm(null);
+          }
+        }}
+      />
       {/* Agent Header */}
       <div className="p-4 border-b border-white/5 bg-[#0a0a0a] flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
@@ -260,7 +291,7 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
             <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-[#0a0a0a]" />
           </div>
           <div>
-            <h2 className="text-[12px] font-black uppercase tracking-tighter text-white leading-none">Flux Agent v4</h2>
+            <h2 className="text-[12px] font-black uppercase tracking-tighter text-white leading-none">Nova AI Agent</h2>
             <div className="flex items-center gap-2 mt-1.5">
                <span className="text-[7px] text-emerald-400 font-bold uppercase py-0.5 px-1 bg-emerald-400/10 rounded">Online</span>
                <span className="text-[7px] text-gray-500 font-bold uppercase tracking-widest">Expert Mode</span>
@@ -799,7 +830,7 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
               e.stopPropagation();
               if (e.key === 'Enter') handleSend();
             }}
-            placeholder="Instruct Flux Agent..." 
+            placeholder="Ask Nova AI anything..." 
             className="w-full bg-[#111] border border-white/5 rounded-lg py-4 pl-10 pr-12 text-[13px] text-gray-300 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all placeholder:text-gray-800 font-medium"
           />
           <button 

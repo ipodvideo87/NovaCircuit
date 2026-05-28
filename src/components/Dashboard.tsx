@@ -102,8 +102,8 @@ export default function Dashboard({
         <div className="p-6">
           <div className="flex items-center justify-between mb-8">
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-gradient-to-tr from-indigo-500 to-purple-500 rounded-lg flex items-center justify-center font-bold text-white italic shadow-lg shadow-indigo-500/20">F</div>
-              <span className="font-black text-lg tracking-tight uppercase">flux.ai</span>
+              <div className="w-8 h-8 bg-gradient-to-tr from-indigo-600 to-purple-500 rounded-lg flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">N</div>
+              <span className="font-black text-lg tracking-tight uppercase">NovaCircuit</span>
             </div>
             <button 
               onClick={() => setSidebarOpen(false)}
@@ -182,7 +182,7 @@ export default function Dashboard({
               <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center font-bold text-xs text-white">JS</div>
               <div className="flex flex-col">
                 <span className="text-sm font-medium leading-none text-white">John Smith</span>
-                <span className="text-[10px] text-gray-500">spankie@flux.ai</span>
+                <span className="text-[10px] text-gray-500">designer@novacircuit.io</span>
               </div>
            </div>
         </div>

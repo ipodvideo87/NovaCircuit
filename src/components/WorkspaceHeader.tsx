@@ -24,6 +24,8 @@ interface WorkspaceHeaderProps {
   onOpenSettings?: () => void;
   onOpenNewProject?: () => void;
   onOpenCloudVault?: () => void;
+  userMode?: string;
+  onChangeMode?: (mode: any) => void;
 }
 
 export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
@@ -32,7 +34,9 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
   onOpenShare,
   onOpenSettings,
   onOpenNewProject,
-  onOpenCloudVault
+  onOpenCloudVault,
+  userMode,
+  onChangeMode
 }) => {
   const isConnected = useProjectStore(state => state.isConnected);
   const presences = useProjectStore(state => state.presences);
@@ -80,14 +84,36 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
       {/* Brand logo and room status info */}
       <div className="flex items-center gap-4 overflow-hidden">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-indigo-600 border border-indigo-400 rounded-xl flex items-center justify-center font-black text-white text-base shadow-[0_0_15px_rgba(79,70,229,0.4)]">
-            E
+          <div className="w-8 h-8 bg-gradient-to-tr from-indigo-600 to-purple-500 border border-indigo-400/50 rounded-xl flex items-center justify-center font-black text-white text-base shadow-[0_0_15px_rgba(99,102,241,0.4)]">
+            N
           </div>
           <div className="flex flex-col">
-            <span className="font-extrabold text-[11px] text-gray-100 tracking-wider leading-none">FirstEDA Studio</span>
-            <span className="text-[8px] text-gray-500 mt-1 uppercase font-bold tracking-widest">v4.0.0-stable</span>
+            <span className="font-extrabold text-[11px] text-gray-100 tracking-wider leading-none">NovaCircuit</span>
+            <span className="text-[8px] text-gray-500 mt-1 uppercase font-bold tracking-widest">EDA Studio</span>
           </div>
         </div>
+
+        <div className="h-5 w-[1px] bg-white/5 mx-1" />
+
+        {/* User Mode Badge */}
+        {userMode && (
+          <button
+            onClick={() => onChangeMode && onChangeMode(userMode === 'maker' ? 'engineer' : userMode === 'engineer' ? 'studio' : 'maker')}
+            title="Click to change mode"
+            className={cn(
+              "hidden md:flex items-center gap-1.5 px-2 py-0.5 rounded-lg border text-[8px] font-black uppercase tracking-widest cursor-pointer transition-all",
+              userMode === 'maker' ? "bg-amber-500/10 border-amber-500/20 text-amber-400 hover:bg-amber-500/20" :
+              userMode === 'studio' ? "bg-purple-500/10 border-purple-500/20 text-purple-400 hover:bg-purple-500/20" :
+              "bg-indigo-500/10 border-indigo-500/20 text-indigo-400 hover:bg-indigo-500/20"
+            )}
+          >
+            <span className={cn(
+              'w-1.5 h-1.5 rounded-full',
+              userMode === 'maker' ? 'bg-amber-400' : userMode === 'studio' ? 'bg-purple-400' : 'bg-indigo-400'
+            )} />
+            {userMode} mode
+          </button>
+        )}
 
         <div className="h-5 w-[1px] bg-white/5 mx-1" />
 

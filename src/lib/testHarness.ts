@@ -478,7 +478,7 @@ export class RegressionTestHarness {
 export function runSystemRegressionSuite() {
   return [
     {
-      suiteName: "FirstEDA Compiler and Core Graph Solvers",
+      suiteName: "NovaCircuit Compiler and Core Graph Solvers",
       passed: true,
       assertions: [
         { name: "ProjectGraph initialized with 0 anomalies", passed: true, message: "OK" },

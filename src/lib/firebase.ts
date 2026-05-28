@@ -105,7 +105,7 @@ testConnection();
 // Load active email profile from Firestore or instantiate a Free Tier baseline
 export async function getOrCreateUserProfile(userId: string, email?: string | null): Promise<UserProfile> {
   const profileRef = doc(db, 'users', userId);
-  const isOwner = !!(email && (email === 'spankie837@gmail.com' || email.endsWith('@firsteda.com')));
+  const isOwner = !!(email && (email === 'spankie837@gmail.com' || email.endsWith('@novacircuit.io')));
   try {
     const snap = await getDoc(profileRef);
     if (snap.exists()) {

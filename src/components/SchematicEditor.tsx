@@ -802,7 +802,7 @@ function isSameAction(a: any, b: any): boolean {
   return true;
 }
 
-export default function SchematicEditor() {
+export default function SchematicEditor({ userMode, onChangeMode }: { userMode?: string; onChangeMode?: (m: any) => void }) {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -959,7 +959,7 @@ export default function SchematicEditor() {
   const rollbackEngineeringCommand = useProjectStore(state => state.rollbackEngineeringCommand);
   const requirePro = useProjectStore(state => state.requirePro);
 
-  const [multiplayerRoom, setMultiplayerRoom] = useState("flux-main-sandbox");
+  const [multiplayerRoom, setMultiplayerRoom] = useState("nova-main-sandbox");
   const [multiplayerUserName, setMultiplayerUserName] = useState(() => `Designer_${Math.floor(Math.random() * 90) + 10}`);
   const [showMultiplayerModal, setShowMultiplayerModal] = useState(false);
 
@@ -1654,8 +1654,10 @@ export default function SchematicEditor() {
       onOpenSettings={() => setActiveModal('settings')}
       onOpenNewProject={() => { if (canInteract('new_project')) { setActiveModal('new_project'); } }}
       onOpenCloudVault={() => setShowCloudVault(true)}
+      userMode={userMode}
+      onChangeMode={onChangeMode}
     />
-  ), [view, isMobile, canInteract, handleSetView, showCloudVault]);
+  ), [view, isMobile, canInteract, handleSetView, showCloudVault, userMode, onChangeMode]);
 
   const leftSidebar = useMemo(() => (
         <aside className={cn(
