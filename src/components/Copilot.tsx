@@ -759,7 +759,7 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
            <div className="space-y-3">
              <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-indigo-400">
                 <Bot size={12} />
-                Flux.Agent
+                Nova.AI
                 <motion.span 
                   animate={{ opacity: [1, 0, 1] }} 
                   className="ml-2 w-1.5 h-1.5 bg-indigo-500 rounded-full shadow-[0_0_5px_rgba(79,70,229,1)]"
@@ -786,33 +786,37 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
         )}
       </div>
 
-      {/* Action Buttons - Expert Tools */}
-      <div className="px-4 py-3 bg-[#0a0a0a] border-y border-white/5 flex gap-2 overflow-x-auto scrollbar-hide">
-         {[
-           { label: 'ESP32 Subsystem', cmd: 'Add ESP32 subsystem' },
-           { label: 'Buck Converter', cmd: 'Create buck converter power stage' },
-           { label: 'USB-C PD Block', cmd: 'Add USB-C PD power delivery stage' },
-           { label: 'Clock Buffer Tree', cmd: 'Add clock distribution buffer Si5338' },
-           { label: 'Faraday Shielding', cmd: 'Add EMI shielding guard cage' },
-           { label: 'USB Diff Pair', cmd: 'Route USB differential pair' },
-           { label: 'Optimize PDN', cmd: 'Optimize power distribution network' },
-           { label: 'Decoupling Gp', cmd: 'Add decoupling network' },
-           { label: 'Motor Driver', cmd: 'Create motor driver stage' },
-           { label: 'Sensor Interface', cmd: 'Generate sensor interface' },
-           { label: 'Thermal Grid', cmd: 'Improve thermal performance' },
-           { label: 'Clock EMI Shield', cmd: 'Reduce EMI around clock lines' },
-           { label: 'MCU Auto-alignment', cmd: 'Auto-place MCU support circuitry' },
-           { label: 'Run DRC Integrity', cmd: 'run design rule check' }
-         ].map((tool, i) => (
-           <button 
-             key={i} 
-             onClick={() => { setInput(tool.cmd); setTimeout(() => handleSend(), 50); }}
-             className="min-h-[44px] px-3 bg-white/5 hover:bg-indigo-505 hover:bg-indigo-500/10 border border-white/5 hover:border-indigo-500/20 rounded text-[10px] font-bold text-gray-500 hover:text-indigo-400 transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
-           >
-             <Zap size={11} className="text-indigo-400 animate-pulse" />
-             {tool.label}
-           </button>
-         ))}
+      {/* Action Buttons - Quick Prompts */}
+      <div className="px-4 py-2.5 bg-[#0a0a0a] border-y border-white/5 flex flex-col gap-2 shrink-0">
+        <div className="flex items-center gap-1.5">
+          <span className="text-[8px] text-gray-600 uppercase font-black tracking-widest">Quick Design</span>
+          <div className="flex-1 h-px bg-white/5" />
+          <span className="text-[8px] text-gray-700 uppercase font-bold tracking-widest">scroll →</span>
+        </div>
+        <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-1">
+          {[
+            { label: '💡 LED Circuit', cmd: 'Design a simple LED blink circuit with a current-limiting resistor connected to a 3.3V GPIO pin', category: 'starter' },
+            { label: '⚡ Buck Converter', cmd: 'Create a 12V to 5V 2A buck converter power stage', category: 'power' },
+            { label: '🔵 ESP32 Board', cmd: 'Add an ESP32 WiFi module with decoupling capacitors and antenna clearance', category: 'mcu' },
+            { label: '🔌 USB-C Power', cmd: 'Add USB-C Power Delivery input stage with CC resistors', category: 'power' },
+            { label: '🌡️ Sensor Hub', cmd: 'Generate an I2C sensor interface with pull-up resistors for temperature and humidity sensing', category: 'sensor' },
+            { label: '🔊 Audio Amp', cmd: 'Create a small audio amplifier output stage with volume control', category: 'analog' },
+            { label: '🔋 LiPo Charger', cmd: 'Add a single-cell LiPo battery charger circuit with charge status LED', category: 'power' },
+            { label: '🚗 Motor Driver', cmd: 'Create an H-bridge motor driver stage for a DC motor', category: 'power' },
+            { label: '📡 RF Antenna', cmd: 'Add a 2.4GHz antenna matching network with impedance matching', category: 'rf' },
+            { label: '✅ Run DRC', cmd: 'Run a complete design rule check and electrical rules check on the current board', category: 'verify' },
+            { label: '🔎 Check Errors', cmd: 'Review the current schematic for any electrical errors or missing connections', category: 'verify' },
+            { label: '🏭 Export BOM', cmd: 'Generate a bill of materials for the current design with part numbers and quantities', category: 'export' },
+          ].map((tool, i) => (
+            <button 
+              key={i} 
+              onClick={() => { setInput(tool.cmd); setTimeout(() => handleSend(), 50); }}
+              className="min-h-[36px] px-3 bg-white/[0.03] hover:bg-indigo-500/10 border border-white/5 hover:border-indigo-500/20 rounded-lg text-[10px] font-bold text-gray-500 hover:text-indigo-300 transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer shrink-0"
+            >
+              {tool.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Input Area */}
