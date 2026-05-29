@@ -293,7 +293,7 @@ const PCBComponentNode = React.memo<{ comp: any; isSelected: boolean; processSca
   return true;
 });
 
-const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSelect, onCommitTransaction, mode = 'live' }: { graph: ProjectGraph, selectedIds?: string[], onSelect?: (id: string) => void, onCommitTransaction?: (graph: ProjectGraph) => void, mode?: 'live' | 'replay' | 'inspect' }) {
+const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSelect, onCommitTransaction, mode = 'live', autoRouteTrigger = 0 }: { graph: ProjectGraph, selectedIds?: string[], onSelect?: (id: string) => void, onCommitTransaction?: (graph: ProjectGraph) => void, mode?: 'live' | 'replay' | 'inspect', autoRouteTrigger?: number }) {
   const isInteractive = mode === 'live';
   const isReadOnly = mode !== 'live';
 
@@ -508,6 +508,15 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
       }
     }, 600);
   }, [graph, board.ratnest, onCommitTransaction, isReadOnly, showToast]);
+
+  // Trigger auto-route when parent requests it (e.g. from Copilot button)
+  const prevAutoRouteTrigger = useRef(0);
+  useEffect(() => {
+    if (autoRouteTrigger > 0 && autoRouteTrigger !== prevAutoRouteTrigger.current && !isAutoRouting) {
+      prevAutoRouteTrigger.current = autoRouteTrigger;
+      runBoardAutoRouter();
+    }
+  }, [autoRouteTrigger, isAutoRouting, runBoardAutoRouter]);
 
   // Constraint Manager & Net-Class States
   const [rightSidebarTab, setRightSidebarTab] = useState<'board' | 'constraints'>('board');

@@ -51,9 +51,10 @@ interface Message {
 interface FluxCopilotProps {
   onAiAction?: (actions: AIAction[], explanation?: string) => void;
   projectState?: ProjectGraph;
+  onAutoRoute?: () => void;
 }
 
-export default React.memo(function FluxCopilot({ onAiAction, projectState }: FluxCopilotProps) {
+export default React.memo(function FluxCopilot({ onAiAction, projectState, onAutoRoute }: FluxCopilotProps) {
   // Global Store state and action triggers
   const {
     commandRuntime,
@@ -794,7 +795,16 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
           <span className="text-[8px] text-gray-700 uppercase font-bold tracking-widest">scroll →</span>
         </div>
         <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-1">
+          {onAutoRoute && (
+            <button
+              onClick={onAutoRoute}
+              className="min-h-[36px] px-3 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 hover:border-emerald-500/50 rounded-lg text-[10px] font-bold text-emerald-400 hover:text-emerald-300 transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer shrink-0"
+            >
+              🔌 Auto-Route Traces
+            </button>
+          )}
           {[
+            { label: '🐬 Flipper Zero Clone', cmd: 'Build a Flipper Zero clone — multi-protocol wireless security tool with STM32WB55, CC1101 Sub-GHz radio, NFC reader, 125kHz RFID, USB-C charging, and LiPo battery management', category: 'complex' },
             { label: '💡 LED Circuit', cmd: 'Design a simple LED blink circuit with a current-limiting resistor connected to a 3.3V GPIO pin', category: 'starter' },
             { label: '⚡ Buck Converter', cmd: 'Create a 12V to 5V 2A buck converter power stage', category: 'power' },
             { label: '🔵 ESP32 Board', cmd: 'Add an ESP32 WiFi module with decoupling capacitors and antenna clearance', category: 'mcu' },
@@ -850,5 +860,5 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState }: Flu
     </div>
   );
 }, (prev, next) => {
-  return prev.onAiAction === next.onAiAction && prev.projectState === next.projectState;
+  return prev.onAiAction === next.onAiAction && prev.projectState === next.projectState && prev.onAutoRoute === next.onAutoRoute;
 });

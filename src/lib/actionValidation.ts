@@ -113,14 +113,21 @@ function applyAction(action: AIAction, graph: ProjectGraph) {
       const pinA = parsePin(from);
       const pinB = parsePin(to);
       
-      // 2. Prevent connecting nets to non-existent pins/components
+      // 2. Prevent connecting nets to non-existent components
+      // Pins are auto-created if they don't exist yet (AI may use descriptive pin names)
       const compA = graph.components.find(c => c.designator === pinA.componentId);
       if (!compA) throw new Error(`Source component '${pinA.componentId}' not found.`);
-      if (!(compA.pins || []).some((p: any) => p.name === pinA.pinName)) throw new Error(`Pin '${pinA.pinName}' does not exist on '${compA.designator}'.`);
+      if (!compA.pins) compA.pins = [];
+      if (!(compA.pins as any[]).some((p: any) => p.name === pinA.pinName)) {
+        (compA.pins as any[]).push({ name: pinA.pinName, type: 'passive' });
+      }
 
       const compB = graph.components.find(c => c.designator === pinB.componentId);
       if (!compB) throw new Error(`Target component '${pinB.componentId}' not found.`);
-      if (!(compB.pins || []).some((p: any) => p.name === pinB.pinName)) throw new Error(`Pin '${pinB.pinName}' does not exist on '${compB.designator}'.`);
+      if (!compB.pins) compB.pins = [];
+      if (!(compB.pins as any[]).some((p: any) => p.name === pinB.pinName)) {
+        (compB.pins as any[]).push({ name: pinB.pinName, type: 'passive' });
+      }
       
       // Generate ID purely based on the new graph state to guarantee determinism
       let netNum = 1;
@@ -246,8 +253,16 @@ function applyAction(action: AIAction, graph: ProjectGraph) {
       
       const compA = graph.components.find(c => c.designator === pinA.componentId);
       if (!compA) throw new Error(`Source component '${pinA.componentId}' not found.`);
+      if (!compA.pins) compA.pins = [];
+      if (!(compA.pins as any[]).some((p: any) => p.name === pinA.pinName)) {
+        (compA.pins as any[]).push({ name: pinA.pinName, type: 'passive' });
+      }
       const compB = graph.components.find(c => c.designator === pinB.componentId);
       if (!compB) throw new Error(`Target component '${pinB.componentId}' not found.`);
+      if (!compB.pins) compB.pins = [];
+      if (!(compB.pins as any[]).some((p: any) => p.name === pinB.pinName)) {
+        (compB.pins as any[]).push({ name: pinB.pinName, type: 'passive' });
+      }
       
       let netNum = 1;
       while(graph.nets.some(n => n.id === `net-${netNum}`)) netNum++;

@@ -809,6 +809,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
   const [activeTab, setActiveTab] = useState<'library' | 'hierarchy'>('library');
   const [view, setView] = useState<EditorView>('pcb');
   const [copilotOpen, setCopilotOpen] = useState(false);
+  const [autoRouteTrigger, setAutoRouteTrigger] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [traceInspectorOpen, setTraceInspectorOpen] = useState(false);
@@ -2055,9 +2056,14 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
     prev, next, exitReplay, handleUndo, handleRedo, goToStep, traceCount
   ]);
 
+  const handleAutoRoute = useCallback(() => {
+    setView('pcb');
+    setAutoRouteTrigger(t => t + 1);
+  }, []);
+
   const copilotElement = useMemo(() => (
-    <FluxCopilot onAiAction={handleAiActions} projectState={activeGraph} />
-  ), [handleAiActions, activeGraph]);
+    <FluxCopilot onAiAction={handleAiActions} projectState={activeGraph} onAutoRoute={handleAutoRoute} />
+  ), [handleAiActions, activeGraph, handleAutoRoute]);
 
   const rightSidebars = useMemo(() => {
      if (isMobile) return null;
@@ -2202,7 +2208,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
                      </button>
                   </div>
                   <div className="flex-1 overflow-hidden">
-                    <FluxCopilot onAiAction={handleAiActions} projectState={activeGraph} />
+                    <FluxCopilot onAiAction={handleAiActions} projectState={activeGraph} onAutoRoute={handleAutoRoute} />
                   </div>
                </motion.div>
              )}
@@ -3165,6 +3171,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
                     onSelect={handlePcbSelect}
                     onCommitTransaction={commitTransaction}
                     mode={mode}
+                    autoRouteTrigger={autoRouteTrigger}
                   />
                 </motion.div>
               ) : view === '3d' ? (
