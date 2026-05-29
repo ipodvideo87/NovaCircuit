@@ -192,13 +192,13 @@ export function runDRC(board: PCBBoard): DRCViolation[] {
     });
   });
 
-  // 6. Invalid Footprint Mapping Check
+  // 6. Invalid Footprint Mapping Check — only flag components that have no routable pads at all
   board.components.forEach(c => {
-    if (!c.footprintId || c.footprintId === 'DEFAULT' || c.pads.length === 0) {
+    if (c.pads.length === 0) {
       violations.push({
         id: `invalid-fp-${c.id}`,
         type: "overlap",
-        message: `Footprint Definition: Components "${c.designator}" specifies null/empty layout parameters`,
+        message: `Footprint Definition: Component "${c.designator}" has no pads (no pins defined)`,
         elements: [c.id]
       });
     }

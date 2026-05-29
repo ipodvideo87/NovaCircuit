@@ -4,7 +4,12 @@ import App from './App.tsx';
 import './index.css';
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
-  state = { error: null };
+  declare props: { children: ReactNode };
+  declare state: { error: Error | null };
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
   static getDerivedStateFromError(error: Error) { return { error }; }
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('React crash:', error, info);

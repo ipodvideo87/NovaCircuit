@@ -90,6 +90,79 @@ export interface PCBBoard {
 
 const padDerivationCache = new Map<string, { hash: string, pads: BoardPad[] }>();
 
+// Synthesize a generic dual-row / grid footprint from a component's logical pins
+// when no library footprint exists. Guarantees every part has real, routable pads.
+function synthesizePads(
+  pins: { name: string }[],
+  bx: number,
+  by: number,
+  rotation: number,
+  layer: BoardLayer,
+  padToNetMap: Map<string, string>,
+  compId: string
+): BoardPad[] {
+  const n = pins.length;
+  if (n === 0) return [];
+
+  const rad = rotation * Math.PI / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const place = (lx: number, ly: number) => ({ x: bx + (lx * cos - ly * sin), y: by + (lx * sin + ly * cos) });
+
+  let local: { id: string; lx: number; ly: number }[] = [];
+
+  if (n <= 2) {
+    // Passive-style: two pads on a horizontal axis
+    const pitch = 2.0;
+    pins.forEach((p, i) => local.push({ id: p.name, lx: (i === 0 ? -pitch / 2 : pitch / 2), ly: 0 }));
+    if (n === 1) local = [{ id: pins[0].name, lx: 0, ly: 0 }];
+  } else if (n <= 16) {
+    // Dual-row IC (SOIC/QFN-edge style): left column top→bottom, right column bottom→top
+    const pitch = 1.27;
+    const rows = Math.ceil(n / 2);
+    const colX = Math.max(2.5, rows * pitch * 0.35);
+    pins.forEach((p, i) => {
+      if (i < rows) {
+        local.push({ id: p.name, lx: -colX, ly: (i - (rows - 1) / 2) * pitch });
+      } else {
+        const j = i - rows;
+        const rightRows = n - rows;
+        local.push({ id: p.name, lx: colX, ly: ((rightRows - 1) / 2 - j) * pitch });
+      }
+    });
+  } else {
+    // Quad/grid (QFP/BGA-style): wrap pins around 4 edges
+    const perSide = Math.ceil(n / 4);
+    const pitch = 0.8;
+    const half = (perSide - 1) / 2 * pitch;
+    const ext = half + 1.5;
+    pins.forEach((p, i) => {
+      const side = Math.floor(i / perSide);
+      const idx = i % perSide;
+      const off = (idx - (perSide - 1) / 2) * pitch;
+      if (side === 0) local.push({ id: p.name, lx: -ext, ly: off });
+      else if (side === 1) local.push({ id: p.name, lx: off, ly: ext });
+      else if (side === 2) local.push({ id: p.name, lx: ext, ly: -off });
+      else local.push({ id: p.name, lx: -off, ly: -ext });
+    });
+  }
+
+  return local.map(lp => {
+    const pos = place(lp.lx, lp.ly);
+    return {
+      id: lp.id,
+      x: pos.x,
+      y: pos.y,
+      width: n <= 2 ? 0.9 : 0.6,
+      height: n <= 2 ? 1.3 : 1.4,
+      layer,
+      shape: "rect" as const,
+      type: "smd" as const,
+      netId: padToNetMap.get(`${compId}:${lp.id}`)
+    };
+  });
+}
+
 export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
   // Prune padDerivationCache of any components that no longer exist in the graph
   const activeCompIds = new Set<string>();
@@ -170,6 +243,23 @@ export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
            };
          });
          
+         padDerivationCache.set(comp.id, { hash, pads: pads.map(p => ({ ...p })) });
+       }
+    } else {
+       // No library footprint: synthesize routable pads from the component's logical pins
+       const pinList = (comp.pins || []).map(p => ({ name: (p as any).name }));
+       let compNetIds = '';
+       for (let i = 0; i < pinList.length; i++) {
+         compNetIds += (padToNetMap.get(`${comp.id}:${pinList[i].name}`) || 'none');
+         if (i < pinList.length - 1) compNetIds += ',';
+       }
+       const pinSig = pinList.map(p => p.name).join('|');
+       const hash = `SYN:${bx}:${by}:${rotation}:${layer}:${pinSig}:${compNetIds}`;
+       const cached = padDerivationCache.get(comp.id);
+       if (cached && cached.hash === hash) {
+         pads = cached.pads;
+       } else {
+         pads = synthesizePads(pinList, bx, by, rotation, layer, padToNetMap, comp.id);
          padDerivationCache.set(comp.id, { hash, pads: pads.map(p => ({ ...p })) });
        }
     }

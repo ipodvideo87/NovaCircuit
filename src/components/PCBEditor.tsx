@@ -548,31 +548,29 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
 
       const placed = new Map<string, { x: number; y: number }>();
 
-      // Power group: bottom-left cluster
-      powerComps.forEach((c, i) => placed.set(c.designator, { x: 15 + (i % 3) * 25, y: 10 + Math.floor(i / 3) * 30 }));
+      // Power group: bottom-left cluster (keyed by immutable component id)
+      powerComps.forEach((c, i) => placed.set(c.id, { x: 15 + (i % 3) * 25, y: 10 + Math.floor(i / 3) * 30 }));
       // MCU group: center
-      mcuComps.forEach((c, i) => placed.set(c.designator, { x: 100 + (i % 2) * 70, y: 80 + Math.floor(i / 2) * 50 }));
+      mcuComps.forEach((c, i) => placed.set(c.id, { x: 100 + (i % 2) * 70, y: 80 + Math.floor(i / 2) * 50 }));
       // Connectors: right edge
-      connComps.forEach((c, i) => placed.set(c.designator, { x: 260 + (i % 2) * 30, y: 10 + i * 30 }));
+      connComps.forEach((c, i) => placed.set(c.id, { x: 260 + (i % 2) * 30, y: 10 + i * 30 }));
       // Passives: spread around center-right
-      passiveComps.forEach((c, i) => placed.set(c.designator, { x: 180 + (i % 4) * 22, y: 20 + Math.floor(i / 4) * 22 }));
+      passiveComps.forEach((c, i) => placed.set(c.id, { x: 180 + (i % 4) * 22, y: 20 + Math.floor(i / 4) * 22 }));
       // Others: bottom row
-      otherComps.forEach((c, i) => placed.set(c.designator, { x: 15 + (i % 6) * 40, y: 170 + Math.floor(i / 6) * 30 }));
+      otherComps.forEach((c, i) => placed.set(c.id, { x: 15 + (i % 6) * 40, y: 170 + Math.floor(i / 6) * 30 }));
 
+      let placedCount = 0;
       const newGraph: typeof graph = {
         ...graph,
         components: graph.components.map(c => {
-          const pos = placed.get(c.designator);
+          const pos = placed.get(c.id);
           if (!pos) return c;
-          const hasExisting = c.boardPosition && (c.boardPosition.x !== 0 || c.boardPosition.y !== 0);
-          return hasExisting ? c : { ...c, boardPosition: pos };
+          // Respect any explicit existing placement (including a deliberate origin)
+          if (c.boardPosition) return c;
+          placedCount++;
+          return { ...c, boardPosition: pos };
         })
       };
-
-      const placedCount = [...placed.entries()].filter(([id]) => {
-        const orig = graph.components.find(c => c.designator === id);
-        return orig && (!orig.boardPosition || (orig.boardPosition.x === 0 && orig.boardPosition.y === 0));
-      }).length;
       const logs: string[] = [
         `Phase 1 — Placement: ${placedCount} components positioned.`,
         `  Power group (${powerComps.length}): bottom-left cluster`,
