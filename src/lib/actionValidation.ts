@@ -1,6 +1,6 @@
 import { AIAction, ProjectGraph, PCBComponent, Net, ComponentPin } from '../types';
 import { deepCloneGraph } from './transaction';
-import { GlobalLibrary } from './componentLibrary';
+import { GlobalLibrary, resolveFootprintForPart } from './componentLibrary';
 
 export interface ActionValidationResult {
   updatedGraph: ProjectGraph;
@@ -81,9 +81,20 @@ function applyAction(action: AIAction, graph: ProjectGraph) {
       }
 
       if (!finalPins) {
-        finalPins = ((finalPartType || '').includes('MCU') || (finalPartType || '').includes('ESP') 
-          ? [{name: '3V3', type: 'power_in'}, {name: 'GND', type: 'ground'}, {name: 'IO1', type: 'bidirectional'}, {name: 'IO2', type: 'bidirectional'}] as any[]
-          : [{name: '1', type: 'passive'}, {name: '2', type: 'passive'}] as any[]);
+        const pt = (finalPartType || '').toUpperCase();
+        if (pt.includes('MCU') || pt.includes('ESP')) {
+          finalPins = [{name: '3V3', type: 'power_in'}, {name: 'GND', type: 'ground'}, {name: 'IO1', type: 'bidirectional'}, {name: 'IO2', type: 'bidirectional'}] as any[];
+        } else if (pt.includes('BATTERY') || pt.includes('LIPO') || pt.includes('CELL')) {
+          finalPins = [{name: '+', type: 'power_out'}, {name: '-', type: 'ground'}] as any[];
+        } else {
+          finalPins = [{name: '1', type: 'passive'}, {name: '2', type: 'passive'}] as any[];
+        }
+      }
+
+      // Resolve a standard library footprint by part type when none came from a library part
+      if (footprint === 'DEFAULT') {
+        const resolved = resolveFootprintForPart(finalPartType, (finalPins || []).length);
+        if (resolved) footprint = resolved;
       }
 
       graph.components.push({

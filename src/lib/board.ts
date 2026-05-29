@@ -208,14 +208,29 @@ export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
     let pads: BoardPad[] = [];
 
     if (fpDef) {
-       // Stable positional hashing
-       let compNetIds = '';
+       // Map each footprint pad to an effective net key. The AI connects nets by
+       // PIN NAME, so we bind footprint pad geometry to the component's pin names
+       // positionally (pad[i] -> pins[i].name). Extra footprint pads (thermal EP,
+       // USB shield, unused pins) keep their own id. This preserves accurate
+       // physical geometry while keeping net/routing resolution correct.
+       const compPins = comp.pins || [];
+       const padKey = (i: number): string => {
+         const pin = compPins[i] as any;
+         return (pin && pin.name != null) ? String(pin.name) : fpDef.pads[i].id;
+       };
+
        const padsLen = fpDef.pads.length;
+       // Any logical pins beyond the footprint's pad count (e.g. names appended by
+       // connect_net) get synthesized pads below, so routing is never silently lost.
+       const leftoverPins = compPins.slice(padsLen).map((p: any) => ({ name: String(p?.name) }));
+
+       let compNetIds = '';
        for (let i = 0; i < padsLen; i++) {
-         compNetIds += (padToNetMap.get(`${comp.id}:${fpDef.pads[i].id}`) || 'none');
-         if (i < padsLen - 1) compNetIds += ',';
+         compNetIds += (padToNetMap.get(`${comp.id}:${padKey(i)}`) || 'none') + ',';
        }
-       const hash = `${bx}:${by}:${rotation}:${layer}:${comp.footprint}:${compNetIds}`;
+       leftoverPins.forEach(p => { compNetIds += (padToNetMap.get(`${comp.id}:${p.name}`) || 'none') + ','; });
+       const pinSig = compPins.map((p: any) => p?.name ?? '').join('|');
+       const hash = `${bx}:${by}:${rotation}:${layer}:${comp.footprint}:${pinSig}:${compNetIds}`;
        
        const cached = padDerivationCache.get(comp.id);
        if (cached && cached.hash === hash) {
@@ -225,13 +240,14 @@ export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
          const cos = Math.cos(rad);
          const sin = Math.sin(rad);
 
-         pads = fpDef.pads.map(p => {
+         pads = fpDef.pads.map((p, i) => {
            // Transform pad center
            const px = bx + (p.x * cos - p.y * sin);
            const py = by + (p.x * sin + p.y * cos);
+           const key = padKey(i);
 
            return {
-             id: p.id,
+             id: key,
              x: px,
              y: py,
              width: p.width,
@@ -239,9 +255,14 @@ export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
              layer: layer, // Assuming pad matches component side for SMD
              shape: p.shape,
              type: p.type,
-             netId: padToNetMap.get(`${comp.id}:${p.id}`)
+             netId: padToNetMap.get(`${comp.id}:${key}`)
            };
          });
+
+         if (leftoverPins.length > 0) {
+           const offsetY = (fpDef.dimensions?.height || 4) / 2 + 2;
+           pads = pads.concat(synthesizePads(leftoverPins, bx, by + offsetY, rotation, layer, padToNetMap, comp.id));
+         }
          
          padDerivationCache.set(comp.id, { hash, pads: pads.map(p => ({ ...p })) });
        }
