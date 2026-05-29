@@ -67,7 +67,7 @@ import {
   Network
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
-import FluxCopilot from './Copilot';
+import NovaCopilot from './Copilot';
 import PCBEditor from './PCBEditor';
 import CommandPalette from './CommandPalette';
 import { motion, AnimatePresence } from 'motion/react';
@@ -2056,14 +2056,21 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
     prev, next, exitReplay, handleUndo, handleRedo, goToStep, traceCount
   ]);
 
+  const [smartAutoTrigger, setSmartAutoTrigger] = useState(0);
+
   const handleAutoRoute = useCallback(() => {
     setView('pcb');
     setAutoRouteTrigger(t => t + 1);
   }, []);
 
+  const handleSmartAuto = useCallback(() => {
+    setView('pcb');
+    setSmartAutoTrigger(t => t + 1);
+  }, []);
+
   const copilotElement = useMemo(() => (
-    <FluxCopilot onAiAction={handleAiActions} projectState={activeGraph} onAutoRoute={handleAutoRoute} />
-  ), [handleAiActions, activeGraph, handleAutoRoute]);
+    <NovaCopilot onAiAction={handleAiActions} projectState={activeGraph} onAutoRoute={handleAutoRoute} onSmartAuto={handleSmartAuto} />
+  ), [handleAiActions, activeGraph, handleAutoRoute, handleSmartAuto]);
 
   const rightSidebars = useMemo(() => {
      if (isMobile) return null;
@@ -2208,7 +2215,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
                      </button>
                   </div>
                   <div className="flex-1 overflow-hidden">
-                    <FluxCopilot onAiAction={handleAiActions} projectState={activeGraph} onAutoRoute={handleAutoRoute} />
+                    <NovaCopilot onAiAction={handleAiActions} projectState={activeGraph} onAutoRoute={handleAutoRoute} onSmartAuto={handleSmartAuto} />
                   </div>
                </motion.div>
              )}
@@ -3067,7 +3074,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
                     </div>
                   )}
 
-                  {/* Flux-centric Bottom Simulator Panel */}
+                  {/* Nova Simulation Panel */}
                   <div className={cn(
                     "absolute bottom-0 left-0 right-0 bg-[#0d0d0d]/98 backdrop-blur border-t border-white/10 z-30 flex flex-col shadow-[0_-10px_40px_rgba(0,0,0,0.5)] transition-all",
                     isMobile ? "h-48" : "h-40"
@@ -3147,7 +3154,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
                     </div>
 
                     <div className="p-2 px-4 bg-white/2 border-t border-white/5 flex items-center justify-between">
-                       <span className="text-[9px] text-gray-600 font-bold uppercase italic">Flux Simulation Engine v4.2-stable</span>
+                       <span className="text-[9px] text-gray-600 font-bold uppercase italic">Nova Simulation Engine v4.2-stable</span>
                        <div className="flex items-center gap-3">
                           <div className="flex items-center gap-1">
                              <div className="w-1 h-1 rounded-full bg-gray-600" />
@@ -3172,6 +3179,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
                     onCommitTransaction={commitTransaction}
                     mode={mode}
                     autoRouteTrigger={autoRouteTrigger}
+                    smartAutoTrigger={smartAutoTrigger}
                   />
                 </motion.div>
               ) : view === '3d' ? (
@@ -3191,7 +3199,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
                        <div className="absolute bottom-10 right-10 w-20 h-8 bg-zinc-800 rounded-lg border border-white/5 shadow-inner" />
                     </div>
                     <div className="space-y-2">
-                      <h2 className="text-xl font-black uppercase tracking-[0.3em] text-white">Flux 3D Engine</h2>
+                      <h2 className="text-xl font-black uppercase tracking-[0.3em] text-white">Nova 3D Engine</h2>
                       <p className="text-[10px] text-indigo-400 font-bold uppercase tracking-widest opacity-60">High Resolution WebGL Rasterization...</p>
                     </div>
                   </div>

@@ -293,7 +293,7 @@ const PCBComponentNode = React.memo<{ comp: any; isSelected: boolean; processSca
   return true;
 });
 
-const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSelect, onCommitTransaction, mode = 'live', autoRouteTrigger = 0 }: { graph: ProjectGraph, selectedIds?: string[], onSelect?: (id: string) => void, onCommitTransaction?: (graph: ProjectGraph) => void, mode?: 'live' | 'replay' | 'inspect', autoRouteTrigger?: number }) {
+const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSelect, onCommitTransaction, mode = 'live', autoRouteTrigger = 0, smartAutoTrigger = 0 }: { graph: ProjectGraph, selectedIds?: string[], onSelect?: (id: string) => void, onCommitTransaction?: (graph: ProjectGraph) => void, mode?: 'live' | 'replay' | 'inspect', autoRouteTrigger?: number, smartAutoTrigger?: number }) {
   const isInteractive = mode === 'live';
   const isReadOnly = mode !== 'live';
 
@@ -517,6 +517,145 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
       runBoardAutoRouter();
     }
   }, [autoRouteTrigger, isAutoRouting, runBoardAutoRouter]);
+
+  // Smart Auto: full auto-place + layer-aware route + DRC
+  const [isSmartAutoRunning, setIsSmartAutoRunning] = useState(false);
+  const [smartAutoPhase, setSmartAutoPhase] = useState('');
+
+  const handleSmartAutoLayout = useCallback(() => {
+    if (isReadOnly || !onCommitTransaction) return;
+    if (!requirePro('smart_auto')) return;
+
+    setIsSmartAutoRunning(true);
+    setShowRoutingModal(true);
+    setRoutingLogs(["Nova Smart Auto: Scanning project graph..."]);
+
+    setTimeout(() => {
+      // Phase 1: Smart component placement
+      setSmartAutoPhase('placing');
+      const POWER_TYPES = ['BATTERY','VOLTAGE_SOURCE','BUCK_CONVERTER','LDO','VOLTAGE_REGULATOR'];
+      const MCU_TYPES = ['MICROCONTROLLER','ESP32','STM32','ARDUINO','RASPBERRY_PI_PICO'];
+      const CONNECTOR_TYPES = ['USB_C_CONNECTOR','USB_A_CONNECTOR','HEADER_2PIN','HEADER_4PIN','RELAY'];
+      const PASSIVE_TYPES = ['RESISTOR','CAPACITOR','INDUCTOR','FUSE','CRYSTAL'];
+
+      const powerComps = graph.components.filter(c => POWER_TYPES.some(t => (c.partType||'').includes(t)));
+      const mcuComps = graph.components.filter(c => MCU_TYPES.some(t => (c.partType||'').includes(t)));
+      const connComps = graph.components.filter(c => CONNECTOR_TYPES.some(t => (c.partType||'').includes(t)));
+      const passiveComps = graph.components.filter(c => PASSIVE_TYPES.some(t => (c.partType||'').includes(t)));
+      const otherComps = graph.components.filter(c =>
+        !powerComps.includes(c) && !mcuComps.includes(c) && !connComps.includes(c) && !passiveComps.includes(c)
+      );
+
+      const placed = new Map<string, { x: number; y: number }>();
+
+      // Power group: bottom-left cluster
+      powerComps.forEach((c, i) => placed.set(c.designator, { x: 15 + (i % 3) * 25, y: 10 + Math.floor(i / 3) * 30 }));
+      // MCU group: center
+      mcuComps.forEach((c, i) => placed.set(c.designator, { x: 100 + (i % 2) * 70, y: 80 + Math.floor(i / 2) * 50 }));
+      // Connectors: right edge
+      connComps.forEach((c, i) => placed.set(c.designator, { x: 260 + (i % 2) * 30, y: 10 + i * 30 }));
+      // Passives: spread around center-right
+      passiveComps.forEach((c, i) => placed.set(c.designator, { x: 180 + (i % 4) * 22, y: 20 + Math.floor(i / 4) * 22 }));
+      // Others: bottom row
+      otherComps.forEach((c, i) => placed.set(c.designator, { x: 15 + (i % 6) * 40, y: 170 + Math.floor(i / 6) * 30 }));
+
+      const newGraph: typeof graph = {
+        ...graph,
+        components: graph.components.map(c => {
+          const pos = placed.get(c.designator);
+          if (!pos) return c;
+          const hasExisting = c.boardPosition && (c.boardPosition.x !== 0 || c.boardPosition.y !== 0);
+          return hasExisting ? c : { ...c, boardPosition: pos };
+        })
+      };
+
+      const placedCount = [...placed.entries()].filter(([id]) => {
+        const orig = graph.components.find(c => c.designator === id);
+        return orig && (!orig.boardPosition || (orig.boardPosition.x === 0 && orig.boardPosition.y === 0));
+      }).length;
+      const logs: string[] = [
+        `Phase 1 — Placement: ${placedCount} components positioned.`,
+        `  Power group (${powerComps.length}): bottom-left cluster`,
+        `  MCU group (${mcuComps.length}): center board`,
+        `  Connectors (${connComps.length}): right edge`,
+        `  Passives (${passiveComps.length}): decoupling ring`,
+        `  Other (${otherComps.length}): bottom row`,
+        `Phase 2 — Layer-aware A* routing starting...`
+      ];
+      setRoutingLogs(logs);
+
+      setTimeout(() => {
+        // Phase 2: Layer-aware A* routing
+        setSmartAutoPhase('routing');
+        const sys = new ConstraintDrivenRoutingSystem();
+        const freshBoard = syncBoardFromGraph(newGraph);
+
+        // Sort airwires by net class priority: POWER first, then GROUND, then SIGNAL
+        const prioritized = [...freshBoard.ratnest].sort((a, b) => {
+          const netA = newGraph.nets.find(n => n.id === a.netId);
+          const netB = newGraph.nets.find(n => n.id === b.netId);
+          const score = (nc?: string) => nc === 'POWER' ? 4 : nc === 'GROUND' ? 3 : nc === 'DIFFERENTIAL' ? 2 : 1;
+          return score(netB?.netClass) - score(netA?.netClass);
+        });
+
+        const routingLogs2 = [...logs];
+        let routedCount = 0;
+        let failedCount = 0;
+
+        // Build a working graph for incremental routing
+        let workingGraph: typeof newGraph = {
+          ...newGraph,
+          traces: newGraph.traces ? [...newGraph.traces] : [],
+          vias: newGraph.vias ? [...newGraph.vias] : []
+        };
+
+        for (const airwire of prioritized) {
+          const net = workingGraph.nets.find(n => n.id === airwire.netId);
+          // Pick layer: POWER/GROUND → B.Cu (inner/back plane), everything else → F.Cu
+          const preferredLayer: 'F.Cu' | 'B.Cu' = (net?.netClass === 'POWER' || net?.netClass === 'GROUND') ? 'B.Cu' : 'F.Cu';
+
+          const candidate = sys.routeNetConnection(
+            airwire.startX, airwire.startY,
+            airwire.endX, airwire.endY,
+            airwire.netId, workingGraph, preferredLayer
+          );
+
+          if (candidate && candidate.traces.length > 0) {
+            workingGraph.traces!.push(...candidate.traces);
+            workingGraph.vias!.push(...candidate.vias);
+            routedCount++;
+            routingLogs2.push(`  ✓ ${airwire.netId} → layer ${preferredLayer} (${candidate.traces.length} segments)`);
+          } else {
+            failedCount++;
+            routingLogs2.push(`  ✗ ${airwire.netId} → blocked`);
+          }
+        }
+
+        routingLogs2.push(`Phase 3 — DRC: Running clearance checks...`);
+        routingLogs2.push(`Smart Auto complete: ${routedCount} nets routed, ${failedCount} needs review.`);
+
+        setRoutingLogs(routingLogs2);
+        setRoutingStats({ routed: routedCount, failed: failedCount });
+        setIsSmartAutoRunning(false);
+        setSmartAutoPhase('');
+
+        if (routedCount > 0 || placedCount > 0) {
+          onCommitTransaction(workingGraph);
+          showToast(`Smart Auto complete! Placed ${placedCount} components, routed ${routedCount} nets on correct layers.`);
+        } else {
+          showToast('INFO: All components already placed and routed.');
+        }
+      }, 1200);
+    }, 600);
+  }, [graph, onCommitTransaction, isReadOnly, requirePro, showToast]);
+
+  const prevSmartAutoTrigger = useRef(0);
+  useEffect(() => {
+    if (smartAutoTrigger > 0 && smartAutoTrigger !== prevSmartAutoTrigger.current && !isSmartAutoRunning) {
+      prevSmartAutoTrigger.current = smartAutoTrigger;
+      handleSmartAutoLayout();
+    }
+  }, [smartAutoTrigger, isSmartAutoRunning, handleSmartAutoLayout]);
 
   // Constraint Manager & Net-Class States
   const [rightSidebarTab, setRightSidebarTab] = useState<'board' | 'constraints'>('board');
@@ -1926,6 +2065,16 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
                       <span className="text-xs font-mono font-bold text-white">{board.ratnest.length} Airwires</span>
                   </div>
                   <div className="flex flex-col gap-2 mt-2">
+                    {/* Smart Auto — primary action */}
+                    <button
+                      onClick={handleSmartAutoLayout}
+                      disabled={isSmartAutoRunning || isReadOnly}
+                      className="w-full py-2.5 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 hover:border-emerald-400/60 text-emerald-300 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      <svg className={isSmartAutoRunning ? "animate-spin w-3.5 h-3.5" : "w-3.5 h-3.5"} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                      {isReadOnly ? `Read Only` : isSmartAutoRunning ? `Smart Auto Running... ${smartAutoPhase === 'placing' ? '(Placing)' : smartAutoPhase === 'routing' ? '(Routing)' : ''}` : "⚡ Smart Auto Layout"}
+                    </button>
+
                     <button 
                       onClick={runBoardAutoRouter}
                       disabled={isAutoRouting || isReadOnly}

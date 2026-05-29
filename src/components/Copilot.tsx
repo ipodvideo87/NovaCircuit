@@ -48,13 +48,14 @@ interface Message {
   rawResponse?: any;
 }
 
-interface FluxCopilotProps {
+interface NovaCopilotProps {
   onAiAction?: (actions: AIAction[], explanation?: string) => void;
   projectState?: ProjectGraph;
   onAutoRoute?: () => void;
+  onSmartAuto?: () => void;
 }
 
-export default React.memo(function FluxCopilot({ onAiAction, projectState, onAutoRoute }: FluxCopilotProps) {
+export default React.memo(function NovaCopilot({ onAiAction, projectState, onAutoRoute, onSmartAuto }: NovaCopilotProps) {
   // Global Store state and action triggers
   const {
     commandRuntime,
@@ -501,7 +502,7 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState, onAut
               m.role === 'assistant' ? "text-indigo-400" : "text-gray-500"
             )}>
               {m.role === 'assistant' ? <Bot size={12} /> : <User size={12} />}
-              {m.role === 'assistant' ? "Flux.Agent" : "Developer"}
+              {m.role === 'assistant' ? "Nova.AI" : "Developer"}
               <span className="ml-auto opacity-30 font-normal">{m.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             </div>
 
@@ -795,12 +796,20 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState, onAut
           <span className="text-[8px] text-gray-700 uppercase font-bold tracking-widest">scroll →</span>
         </div>
         <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-1">
+          {onSmartAuto && (
+            <button
+              onClick={onSmartAuto}
+              className="min-h-[36px] px-3 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 hover:border-emerald-400/60 rounded-lg text-[10px] font-bold text-emerald-300 hover:text-emerald-200 transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer shrink-0"
+            >
+              ⚡ Smart Auto
+            </button>
+          )}
           {onAutoRoute && (
             <button
               onClick={onAutoRoute}
-              className="min-h-[36px] px-3 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 hover:border-emerald-500/50 rounded-lg text-[10px] font-bold text-emerald-400 hover:text-emerald-300 transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer shrink-0"
+              className="min-h-[36px] px-3 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30 hover:border-indigo-500/50 rounded-lg text-[10px] font-bold text-indigo-400 hover:text-indigo-300 transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer shrink-0"
             >
-              🔌 Auto-Route Traces
+              🔌 Auto-Route
             </button>
           )}
           {[
@@ -860,5 +869,5 @@ export default React.memo(function FluxCopilot({ onAiAction, projectState, onAut
     </div>
   );
 }, (prev, next) => {
-  return prev.onAiAction === next.onAiAction && prev.projectState === next.projectState && prev.onAutoRoute === next.onAutoRoute;
+  return prev.onAiAction === next.onAiAction && prev.projectState === next.projectState && prev.onAutoRoute === next.onAutoRoute && prev.onSmartAuto === next.onSmartAuto;
 });

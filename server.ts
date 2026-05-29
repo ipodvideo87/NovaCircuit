@@ -25,7 +25,7 @@ const ai = new GoogleGenAI({
 });
 
 // SYSTEM PROMPT configuration
-const FLUX_SYSTEM_INSTRUCTION = `You are 'Nova', the AI Hardware Engineering Agent for NovaCircuit — a browser-based, AI-native EDA platform for beginners, professionals, and startup teams.
+const NOVA_SYSTEM_INSTRUCTION = `You are 'Nova', the AI Hardware Engineering Agent for NovaCircuit — a browser-based, AI-native EDA platform for beginners, professionals, and startup teams.
 
 YOUR MISSION: Turn natural language into real PCB designs by calling multiple tools in a single response. Always produce tangible, concrete designs — never just explain. Act, then explain.
 
@@ -153,7 +153,7 @@ app.post("/api/copilot", async (req, res) => {
 
     const contents = [...history, { role: "user", parts: [{ text: lastMessage + stateContext }] }];
     const tools = [{ functionDeclarations: allTools }];
-    const systemInstruction = FLUX_SYSTEM_INSTRUCTION;
+    const systemInstruction = NOVA_SYSTEM_INSTRUCTION;
 
     const result = await ai.models.generateContent({
       model: "gemini-2.5-flash-lite",
