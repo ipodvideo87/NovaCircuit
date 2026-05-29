@@ -1,6 +1,7 @@
 import { ProjectGraph, Net, Point, AIAction, NetClass, DifferentialPair } from '../types';
 import { BoardTrace, Via, KeepoutZone, BoardLayer } from './board';
 import { PhysicsSimulationEngine } from './physicsRuntime';
+import { GlobalLibrary } from './componentLibrary';
 
 /**
  * Node representation for multi-layer pathfinding.
@@ -14,6 +15,50 @@ export interface RoutingNode {
   fCost: number; // Total cost (gCost + hCost)
   parent?: RoutingNode;
   viaTransition?: boolean;
+}
+
+/**
+ * Binary min-heap ordered by fCost for the A* open set. Uses lazy deletion:
+ * improved nodes are re-pushed and stale pops are discarded by the caller via a
+ * closed-set check. This keeps push/pop at O(log n) instead of the O(n) linear
+ * scans that made long routes prohibitively slow.
+ */
+class MinHeap {
+  private data: RoutingNode[] = [];
+  size(): number { return this.data.length; }
+  push(node: RoutingNode): void {
+    const d = this.data;
+    d.push(node);
+    let i = d.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (d[parent].fCost <= d[i].fCost) break;
+      [d[parent], d[i]] = [d[i], d[parent]];
+      i = parent;
+    }
+  }
+  pop(): RoutingNode | undefined {
+    const d = this.data;
+    if (d.length === 0) return undefined;
+    const top = d[0];
+    const last = d.pop()!;
+    if (d.length > 0) {
+      d[0] = last;
+      let i = 0;
+      const n = d.length;
+      while (true) {
+        const l = 2 * i + 1;
+        const r = 2 * i + 2;
+        let smallest = i;
+        if (l < n && d[l].fCost < d[smallest].fCost) smallest = l;
+        if (r < n && d[r].fCost < d[smallest].fCost) smallest = r;
+        if (smallest === i) break;
+        [d[smallest], d[i]] = [d[i], d[smallest]];
+        i = smallest;
+      }
+    }
+    return top;
+  }
 }
 
 /**
@@ -66,9 +111,12 @@ export class ConstraintDrivenRoutingSystem {
     minClearanceMm: 0.25,
     viaDrillSizeMm: 0.3,
     viaPadSizeMm: 0.6,
-    layerChangePenalty: 120.0, // High penalty to minimize vias
+    layerChangePenalty: 30.0, // Moderate via cost: discourages excess vias but
+                              // still lets routes weave to the other layer to
+                              // escape congestion (was 120, which stranded
+                              // board-spanning signals on a full layer).
     uncoupledDifferentialPenalty: 45.0,
-    proximityToNoisyPenalty: 15.0
+    proximityToNoisyPenalty: 4.0
   };
 
   constructor(
@@ -99,9 +147,15 @@ export class ConstraintDrivenRoutingSystem {
     layer: BoardLayer,
     activeNetId: string,
     graph: ProjectGraph,
-    radiusMm: number
+    radiusMm: number,
+    exemptZones?: { x: number; y: number; r: number }[]
   ): boolean {
-    const clearance = Math.max(radiusMm, this.defaultConstraints.minClearanceMm);
+    // Required centre-line distance to a foreign trace must leave the full design
+    // clearance PLUS this route's own half-width (radiusMm). The foreign trace's
+    // half-width is added at the comparison site. Previously this used max(...),
+    // which dropped the own half-width and packed traces ~one half-width too tight,
+    // so successfully "routed" nets then failed the DRC trace-spacing check.
+    const clearance = this.defaultConstraints.minClearanceMm + radiusMm;
 
     // 1. Keepout Zones Checks
     if (graph.keepouts) {
@@ -117,23 +171,60 @@ export class ConstraintDrivenRoutingSystem {
       }
     }
 
-    // 2. Component Collisions (Overlap checks)
+    // 2. Component body collisions.
+    // The router must be free to leave the source pad and reach the target pad,
+    // so any point inside an exempt zone (centred on this net's two endpoints)
+    // is always allowed. For every other component we block only the actual
+    // footprint body (derived from its real dimensions) on the SAME copper layer
+    // — never a blanket radius around the centre, which previously walled off
+    // small parts entirely.
+    if (exemptZones) {
+      for (const z of exemptZones) {
+        const ex = x - z.x;
+        const ey = y - z.y;
+        if (ex * ex + ey * ey < z.r * z.r) {
+          // Inside an endpoint escape zone — skip component-body blocking,
+          // but still honour foreign-trace spacing checked below.
+          return this.violatesTraceClearance(x, y, layer, activeNetId, clearance, graph);
+        }
+      }
+    }
+
+    // Block only the dense central core of each component body (where pads/vias
+    // cluster), not the whole courtyard. On a 2-layer board traces routinely pass
+    // under SMD parts between their pads, so blocking the full body needlessly
+    // strands board-spanning signals. CORE_FRACTION keeps routes out of the
+    // congested centre while leaving the perimeter usable.
+    const CORE_FRACTION = 0.5;
     for (const comp of graph.components) {
-      // Check proximity to other locked pads
-      if (comp.boardPosition) {
-        const dist = this.distance2D({ x, y }, comp.boardPosition);
-        // Avoid routing through component centers unless matched
-        if (dist < 2.0 && comp.layer === layer) {
-          return true;
+      if (comp.boardPosition && (comp.layer || "F.Cu") === layer) {
+        const fp = GlobalLibrary.getFootprint(comp.footprint);
+        const halfW = (fp ? fp.dimensions.width / 2 : 1.0) * CORE_FRACTION;
+        const halfH = (fp ? fp.dimensions.height / 2 : 1.0) * CORE_FRACTION;
+        const dx = Math.abs(x - comp.boardPosition.x);
+        const dy = Math.abs(y - comp.boardPosition.y);
+        if (dx < halfW && dy < halfH) {
+          return true; // Inside a component's dense core
         }
       }
     }
 
     // 3. Trace Collisions from other nets
+    return this.violatesTraceClearance(x, y, layer, activeNetId, clearance, graph);
+  }
+
+  /** Foreign-net trace spacing check, shared by the main and endpoint-exempt paths. */
+  private violatesTraceClearance(
+    x: number,
+    y: number,
+    layer: BoardLayer,
+    activeNetId: string,
+    clearance: number,
+    graph: ProjectGraph
+  ): boolean {
     if (graph.traces) {
       for (const trace of graph.traces) {
         if (trace.netId !== activeNetId && trace.layer === layer) {
-          // Distance from point to trace segment
           const dist = this.pointToSegmentDistance(x, y, trace.startX, trace.startY, trace.endX, trace.endY);
           if (dist < clearance + trace.width / 2) {
             return true; // Spacing violation
@@ -141,7 +232,6 @@ export class ConstraintDrivenRoutingSystem {
         }
       }
     }
-
     return false;
   }
 
@@ -222,15 +312,36 @@ export class ConstraintDrivenRoutingSystem {
       }
     }
 
-    // Grid nodes configuration (A* grid spacing e.g., 0.5mm step bounding boxes)
-    const minX = Math.min(start.x, target.x) - 10;
-    const maxX = Math.max(start.x, target.x) + 10;
-    const minY = Math.min(start.y, target.y) - 10;
-    const maxY = Math.max(start.y, target.y) + 10;
+    // Grid nodes configuration (A* grid spacing e.g., 0.5mm step bounding boxes).
+    // The search box must be wide enough to let board-spanning nets detour AROUND
+    // obstacles, otherwise long power/connector runs become unrouteable. We scale
+    // the margin with the route length so short nets stay fast while long nets get
+    // room to manoeuvre.
+    const routeDist = this.distance2D(start, target);
+    const margin = Math.max(20, routeDist * 0.6);
+    const minX = Math.min(start.x, target.x) - margin;
+    const maxX = Math.max(start.x, target.x) + margin;
+    const minY = Math.min(start.y, target.y) - margin;
+    const maxY = Math.max(start.y, target.y) + margin;
 
     const step = 0.5; // mm step routing mesh
-    const openSet: RoutingNode[] = [];
-    const closedSet: RoutingNode[] = [];
+
+    // Endpoint escape zones: always allow routing immediately around the source
+    // and target pads so the router can physically leave/enter them regardless of
+    // the owning component's body.
+    const exemptZones = [
+      { x: start.x, y: start.y, r: 3.0 },
+      { x: target.x, y: target.y, r: 3.0 }
+    ];
+    // A* uses a binary min-heap (ordered by fCost) for the open set and hash maps
+    // keyed by quantised "x:y:layer" for O(1) membership/visited lookups. Linear
+    // array scans here previously made long/board-spanning routes prohibitively
+    // slow once the search box and iteration budget were widened.
+    const heap = new MinHeap();
+    const openMap = new Map<string, RoutingNode>();
+    const closedMap = new Map<string, boolean>();
+    const nodeKey = (x: number, y: number, layer: BoardLayer) =>
+      `${Math.round(x * 20)}:${Math.round(y * 20)}:${layer}`;
 
     const startNode: RoutingNode = {
       x: start.x,
@@ -241,22 +352,21 @@ export class ConstraintDrivenRoutingSystem {
       fCost: this.distance2D(start, target)
     };
 
-    openSet.push(startNode);
+    heap.push(startNode);
+    openMap.set(nodeKey(startNode.x, startNode.y, startNode.layer), startNode);
 
     let foundNode: RoutingNode | null = null;
-    let limitLoops = 4000; // computational limit check
+    // Scale the iteration budget with route length so long detours don't give up
+    // prematurely, while keeping short nets cheap. Capped to bound worst-case cost.
+    let limitLoops = Math.min(80000, Math.max(12000, Math.ceil(routeDist / step) * 200));
 
-    while (openSet.length > 0 && limitLoops > 0) {
+    while (heap.size() > 0 && limitLoops > 0) {
       limitLoops--;
-      // Find lowest fCost node
-      let currentIdx = 0;
-      for (let i = 1; i < openSet.length; i++) {
-        if (openSet[i].fCost < openSet[currentIdx].fCost) {
-          currentIdx = i;
-        }
-      }
 
-      const current = openSet[currentIdx];
+      const current = heap.pop()!;
+      const curKey = nodeKey(current.x, current.y, current.layer);
+      // Skip stale heap entries (a cheaper path to this node was already expanded).
+      if (closedMap.get(curKey)) continue;
 
       // Reached Target?
       if (this.distance2D({ x: current.x, y: current.y }, target) < step * 1.5) {
@@ -264,8 +374,8 @@ export class ConstraintDrivenRoutingSystem {
         break;
       }
 
-      openSet.splice(currentIdx, 1);
-      closedSet.push(current);
+      openMap.delete(curKey);
+      closedMap.set(curKey, true);
 
       // Branch outward through 8 directions and layer options (Vias transition)
       const directions: { dx: number; dy: number }[] = [
@@ -290,14 +400,25 @@ export class ConstraintDrivenRoutingSystem {
 
         if (nextX < minX || nextX > maxX || nextY < minY || nextY > maxY) continue;
 
-        // Verify obstacle clearance boundaries
-        if (this.checkClearanceViolation(nextX, nextY, adj.layer, netId, graph, currentWidthMm / 2)) {
+        // Verify obstacle clearance boundaries at the destination node and, for
+        // moves that actually travel (not a via), at the segment midpoint too.
+        // Node-only sampling lets a diagonal step skim or cross a foreign trace
+        // between grid points; the midpoint check closes that gap so routed nets
+        // satisfy the DRC trace-spacing rule.
+        if (this.checkClearanceViolation(nextX, nextY, adj.layer, netId, graph, currentWidthMm / 2, exemptZones)) {
           continue; // Path blocked
+        }
+        if (!adj.isVia) {
+          const midX = parseFloat(((current.x + nextX) / 2).toFixed(2));
+          const midY = parseFloat(((current.y + nextY) / 2).toFixed(2));
+          if (this.checkClearanceViolation(midX, midY, adj.layer, netId, graph, currentWidthMm / 2, exemptZones)) {
+            continue; // Segment would skim a foreign trace mid-step
+          }
         }
 
         // Duplicate checks
-        const closedMatch = closedSet.find(n => Math.abs(n.x - nextX) < 0.05 && Math.abs(n.y - nextY) < 0.05 && n.layer === adj.layer);
-        if (closedMatch) continue;
+        const nextKey = nodeKey(nextX, nextY, adj.layer);
+        if (closedMap.get(nextKey)) continue;
 
         const baseMovementCost = adj.isVia ? this.defaultConstraints.layerChangePenalty : Math.sqrt(adj.dlX * adj.dlX + adj.dlY * adj.dlY);
 
@@ -317,7 +438,7 @@ export class ConstraintDrivenRoutingSystem {
         const nextGCost = current.gCost + baseMovementCost + emiPenalty;
         const nextHCost = this.distance2D({ x: nextX, y: nextY }, target);
 
-        const openMatch = openSet.find(n => Math.abs(n.x - nextX) < 0.05 && Math.abs(n.y - nextY) < 0.05 && n.layer === adj.layer);
+        const openMatch = openMap.get(nextKey);
 
         if (openMatch) {
           if (nextGCost < openMatch.gCost) {
@@ -325,9 +446,11 @@ export class ConstraintDrivenRoutingSystem {
             openMatch.fCost = nextGCost + openMatch.hCost;
             openMatch.parent = current;
             openMatch.viaTransition = adj.isVia;
+            // Re-insert with the improved cost; the stale entry is skipped on pop.
+            heap.push(openMatch);
           }
         } else {
-          openSet.push({
+          const newNode: RoutingNode = {
             x: nextX,
             y: nextY,
             layer: adj.layer,
@@ -336,7 +459,9 @@ export class ConstraintDrivenRoutingSystem {
             fCost: nextGCost + nextHCost,
             parent: current,
             viaTransition: adj.isVia
-          });
+          };
+          openMap.set(nextKey, newNode);
+          heap.push(newNode);
         }
       }
     }
@@ -356,7 +481,32 @@ export class ConstraintDrivenRoutingSystem {
       backtracker = backtracker.parent;
     }
 
-    // Trace segment optimization & reduction (Straight lining consecutive colinear steps)
+    // Materialise the A* path into traces. Merge ONLY genuinely colinear
+    // consecutive steps; a direction change must start a new segment, otherwise
+    // a bent path that A* routed around an obstacle would be collapsed into a
+    // single straight line cutting through that obstacle (and through clearance
+    // regions that were never validated as a whole segment). Vias/layer changes
+    // also break the current segment.
+    const pushTrace = (from: RoutingNode, to: RoutingNode) => {
+      if (from.x === to.x && from.y === to.y) return; // zero-length
+      candidateTraces.push({
+        id: `trace_r_${netId}_s${candidateTraces.length}_${Date.now()}`,
+        netId,
+        layer: from.layer,
+        width: currentWidthMm,
+        startX: from.x,
+        startY: from.y,
+        endX: to.x,
+        endY: to.y
+      });
+    };
+    const stepDir = (a: RoutingNode, b: RoutingNode): { x: number; y: number } => {
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      return { x: dx / len, y: dy / len };
+    };
+
     let currentSegmentStart = pathSeq[0];
     let viaIndex = 0;
 
@@ -365,21 +515,8 @@ export class ConstraintDrivenRoutingSystem {
       const curr = pathSeq[i];
 
       if (curr.viaTransition) {
-        // Build trace segment up to via point
-        if (currentSegmentStart !== prev) {
-          candidateTraces.push({
-            id: `trace_r_${netId}_s${candidateTraces.length}_${Date.now()}`,
-            netId,
-            layer: currentSegmentStart.layer,
-            width: currentWidthMm,
-            startX: currentSegmentStart.x,
-            startY: currentSegmentStart.y,
-            endX: prev.x,
-            endY: prev.y
-          });
-        }
-
-        // Build Via node
+        // Close the in-progress trace, drop a via at the transition point.
+        pushTrace(currentSegmentStart, prev);
         candidateVias.push({
           id: `via_r_${netId}_v${viaIndex++}_${Date.now()}`,
           netId,
@@ -388,40 +525,24 @@ export class ConstraintDrivenRoutingSystem {
           drillSize: this.defaultConstraints.viaDrillSizeMm,
           padSize: this.defaultConstraints.viaPadSizeMm
         });
+        currentSegmentStart = curr;
+        continue;
+      }
 
-        currentSegmentStart = curr;
-      } else if (curr.layer !== currentSegmentStart.layer) {
-        // Guard transition step
-        if (currentSegmentStart !== prev) {
-          candidateTraces.push({
-            id: `trace_r_${netId}_s${candidateTraces.length}_${Date.now()}`,
-            netId,
-            layer: currentSegmentStart.layer,
-            width: currentWidthMm,
-            startX: currentSegmentStart.x,
-            startY: currentSegmentStart.y,
-            endX: prev.x,
-            endY: prev.y
-          });
+      // Same-layer move: break the segment if the travel direction changed.
+      if (prev !== currentSegmentStart) {
+        const d1 = stepDir(currentSegmentStart, prev);
+        const d2 = stepDir(prev, curr);
+        if (Math.abs(d1.x - d2.x) > 1e-6 || Math.abs(d1.y - d2.y) > 1e-6) {
+          pushTrace(currentSegmentStart, prev);
+          currentSegmentStart = prev;
         }
-        currentSegmentStart = curr;
       }
     }
 
     // Append last segment up to final coordinates
     const lastPoint = pathSeq[pathSeq.length - 1];
-    if (currentSegmentStart !== lastPoint) {
-      candidateTraces.push({
-        id: `trace_r_${netId}_s${candidateTraces.length}_${Date.now()}`,
-        netId,
-        layer: currentSegmentStart.layer,
-        width: currentWidthMm,
-        startX: currentSegmentStart.x,
-        startY: currentSegmentStart.y,
-        endX: lastPoint.x,
-        endY: lastPoint.y
-      });
-    }
+    pushTrace(currentSegmentStart, lastPoint);
 
     // Run simulation check over generated segments
     let totalLength = 0;
@@ -623,30 +744,55 @@ export class ConstraintDrivenRoutingSystem {
       return scoreB - scoreA; // Descending priority
     });
 
+    // Route one airwire, trying the preferred layer first and falling back to the
+    // alternate copper layer if the preferred one is walled off.
+    const tryRoute = (
+      airwire: { netId: string; startX: number; startY: number; endX: number; endY: number },
+      preferred: BoardLayer
+    ): boolean => {
+      const layers: BoardLayer[] = preferred === "F.Cu" ? ["F.Cu", "B.Cu"] : ["B.Cu", "F.Cu"];
+      for (const layer of layers) {
+        const candidate = this.routeNetConnection(
+          airwire.startX, airwire.startY, airwire.endX, airwire.endY,
+          airwire.netId, workingGraph, layer
+        );
+        if (candidate && candidate.traces.length > 0) {
+          workingGraph.traces!.push(...candidate.traces);
+          workingGraph.vias!.push(...candidate.vias);
+          logs.push(`Successfully routed net "${airwire.netId}" on ${layer}. Traces: ${candidate.traces.length}, Vias: ${candidate.vias.length}`);
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const layerFor = (netId: string): BoardLayer => {
+      const net = graph.nets.find(n => n.id === netId);
+      return (net?.netClass === "POWER" || net?.netClass === "GROUND") ? "B.Cu" : "F.Cu";
+    };
+
+    const failures: typeof prioritizedAirwires = [];
     for (const airwire of prioritizedAirwires) {
       logs.push(`Routing airwire for net: "${airwire.netId}" from (${airwire.startX}, ${airwire.startY}) to (${airwire.endX}, ${airwire.endY})`);
-
-      // Run A* router connection
-      const candidate = this.routeNetConnection(
-        airwire.startX,
-        airwire.startY,
-        airwire.endX,
-        airwire.endY,
-        airwire.netId,
-        workingGraph,
-        "F.Cu" // Route primarily on Front copper
-      );
-
-      if (candidate && candidate.traces.length > 0) {
-        // Successfully routed! Push traces & vias to the working graph
-        workingGraph.traces!.push(...candidate.traces);
-        workingGraph.vias!.push(...candidate.vias);
+      if (tryRoute(airwire, layerFor(airwire.netId))) {
         routedCount++;
-        logs.push(`Successfully routed net "${airwire.netId}". Score: ${candidate.score}. Traces added: ${candidate.traces.length}, Vias: ${candidate.vias.length}`);
       } else {
-        // Failed or blocked
-        failedCount++;
-        logs.push(`Warning: Pathblocked or unrouteable connector for net "${airwire.netId}" due to spacing clearances or board limits.`);
+        failures.push(airwire);
+      }
+    }
+
+    // Second pass: retry any failures now that all other traces are committed.
+    // Early traces sometimes wall off later nets; a re-attempt (and the built-in
+    // layer fallback) recovers most of them.
+    if (failures.length > 0) {
+      logs.push(`Second pass: retrying ${failures.length} blocked airwire(s)...`);
+      for (const airwire of failures) {
+        if (tryRoute(airwire, layerFor(airwire.netId))) {
+          routedCount++;
+        } else {
+          failedCount++;
+          logs.push(`Warning: Pathblocked or unrouteable connector for net "${airwire.netId}" due to spacing clearances or board limits.`);
+        }
       }
     }
 

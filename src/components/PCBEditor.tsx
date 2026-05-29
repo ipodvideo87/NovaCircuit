@@ -607,25 +607,40 @@ const PCBEditor = React.memo(function PCBEditor({ graph, selectedIds = [], onSel
           vias: newGraph.vias ? [...newGraph.vias] : []
         };
 
-        for (const airwire of prioritized) {
+        // Route an airwire, trying the preferred layer then falling back to the
+        // alternate copper layer if the preferred one is walled off.
+        const routeAirwire = (airwire: typeof prioritized[number]): boolean => {
           const net = workingGraph.nets.find(n => n.id === airwire.netId);
-          // Pick layer: POWER/GROUND → B.Cu (inner/back plane), everything else → F.Cu
           const preferredLayer: 'F.Cu' | 'B.Cu' = (net?.netClass === 'POWER' || net?.netClass === 'GROUND') ? 'B.Cu' : 'F.Cu';
+          const layers: ('F.Cu' | 'B.Cu')[] = preferredLayer === 'F.Cu' ? ['F.Cu', 'B.Cu'] : ['B.Cu', 'F.Cu'];
+          for (const layer of layers) {
+            const candidate = sys.routeNetConnection(
+              airwire.startX, airwire.startY,
+              airwire.endX, airwire.endY,
+              airwire.netId, workingGraph, layer
+            );
+            if (candidate && candidate.traces.length > 0) {
+              workingGraph.traces!.push(...candidate.traces);
+              workingGraph.vias!.push(...candidate.vias);
+              routingLogs2.push(`  ✓ ${airwire.netId} → layer ${layer} (${candidate.traces.length} segments)`);
+              return true;
+            }
+          }
+          return false;
+        };
 
-          const candidate = sys.routeNetConnection(
-            airwire.startX, airwire.startY,
-            airwire.endX, airwire.endY,
-            airwire.netId, workingGraph, preferredLayer
-          );
+        const failedAirwires: typeof prioritized = [];
+        for (const airwire of prioritized) {
+          if (routeAirwire(airwire)) routedCount++;
+          else failedAirwires.push(airwire);
+        }
 
-          if (candidate && candidate.traces.length > 0) {
-            workingGraph.traces!.push(...candidate.traces);
-            workingGraph.vias!.push(...candidate.vias);
-            routedCount++;
-            routingLogs2.push(`  ✓ ${airwire.netId} → layer ${preferredLayer} (${candidate.traces.length} segments)`);
-          } else {
-            failedCount++;
-            routingLogs2.push(`  ✗ ${airwire.netId} → blocked`);
+        // Second pass: retry blocked airwires now that all other traces are placed.
+        if (failedAirwires.length > 0) {
+          routingLogs2.push(`Retrying ${failedAirwires.length} blocked connection(s)...`);
+          for (const airwire of failedAirwires) {
+            if (routeAirwire(airwire)) routedCount++;
+            else { failedCount++; routingLogs2.push(`  ✗ ${airwire.netId} → blocked`); }
           }
         }
 

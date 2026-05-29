@@ -328,17 +328,37 @@ export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
        }
      });
 
-     // Simple chained airwires for ratnest (O(N) instead of MST for now, good enough for visualization)
+     // Greedy nearest-neighbour spanning path. Chaining pads in their arbitrary
+     // declaration order produces long, crossing airwires on high-fanout nets
+     // (GND/VCC) that the router struggles to resolve. Connecting each pad to its
+     // nearest unvisited neighbour keeps every airwire short and easy to route,
+     // while still visiting every pad exactly once.
      if (padLocs.length > 1) {
-       for (let i = 0; i < padLocs.length - 1; i++) {
+       const used = new Array(padLocs.length).fill(false);
+       used[0] = true;
+       let currentIdx = 0;
+       let count = 0;
+       for (let k = 0; k < padLocs.length - 1; k++) {
+         let best = -1;
+         let bestD = Infinity;
+         for (let j = 0; j < padLocs.length; j++) {
+           if (used[j]) continue;
+           const ddx = padLocs[currentIdx].x - padLocs[j].x;
+           const ddy = padLocs[currentIdx].y - padLocs[j].y;
+           const d = ddx * ddx + ddy * ddy;
+           if (d < bestD) { bestD = d; best = j; }
+         }
+         if (best === -1) break;
          board.ratnest.push({
-           id: `${net.id}-rat-${i}`,
+           id: `${net.id}-rat-${count++}`,
            netId: net.id,
-           startX: padLocs[i].x,
-           startY: padLocs[i].y,
-           endX: padLocs[i+1].x,
-           endY: padLocs[i+1].y
+           startX: padLocs[currentIdx].x,
+           startY: padLocs[currentIdx].y,
+           endX: padLocs[best].x,
+           endY: padLocs[best].y
          });
+         used[best] = true;
+         currentIdx = best;
        }
      }
   });

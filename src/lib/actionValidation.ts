@@ -93,7 +93,7 @@ function applyAction(action: AIAction, graph: ProjectGraph) {
 
       // Resolve a standard library footprint by part type when none came from a library part
       if (footprint === 'DEFAULT') {
-        const resolved = resolveFootprintForPart(finalPartType, (finalPins || []).length);
+        const resolved = resolveFootprintForPart(finalPartType, (finalPins || []).length, value);
         if (resolved) footprint = resolved;
       }
 

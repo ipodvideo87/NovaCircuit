@@ -30,19 +30,41 @@ function segmentToSegmentDistance(s1: any, s2: any): number {
 export function runDRC(board: PCBBoard): DRCViolation[] {
   const violations: DRCViolation[] = [];
 
-  // 1. Basic Component Overlap Check (Bounding Box)
+  // 1. Component Overlap Check (size-aware, footprint bounding boxes).
+  // The previous fixed 12mm centre-distance heuristic falsely flagged normally
+  // spaced parts as overlapping. We instead derive each component's real bounding
+  // box from its placed pads and report an overlap only when those boxes actually
+  // intersect (with a small clearance margin).
+  const OVERLAP_MARGIN = 0.3; // mm courtyard gap
+  const bbox = (c: BoardComponent) => {
+    if (!c.pads || c.pads.length === 0) {
+      // No pad geometry — fall back to a tiny box around the centre.
+      return { minX: c.x - 0.5, maxX: c.x + 0.5, minY: c.y - 0.5, maxY: c.y + 0.5 };
+    }
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of c.pads) {
+      minX = Math.min(minX, p.x - p.width / 2);
+      maxX = Math.max(maxX, p.x + p.width / 2);
+      minY = Math.min(minY, p.y - p.height / 2);
+      maxY = Math.max(maxY, p.y + p.height / 2);
+    }
+    return { minX, maxX, minY, maxY };
+  };
+
   for (let i = 0; i < board.components.length; i++) {
     const c1 = board.components[i];
+    const b1 = bbox(c1);
     for (let j = i + 1; j < board.components.length; j++) {
       const c2 = board.components[j];
-      
-      const dx = c1.x - c2.x;
-      if (Math.abs(dx) >= 30) continue; // Safe bbox threshold
-      const dy = c1.y - c2.y;
-      if (Math.abs(dy) >= 30) continue;
-      
-      const distSq = dx*dx + dy*dy;
-      if (distSq < 144) { // overlap threshold square area
+      const b2 = bbox(c2);
+
+      const separated =
+        b1.maxX + OVERLAP_MARGIN <= b2.minX ||
+        b2.maxX + OVERLAP_MARGIN <= b1.minX ||
+        b1.maxY + OVERLAP_MARGIN <= b2.minY ||
+        b2.maxY + OVERLAP_MARGIN <= b1.minY;
+
+      if (!separated) {
         violations.push({
           id: `overlap-${c1.id}-${c2.id}`,
           type: "overlap",

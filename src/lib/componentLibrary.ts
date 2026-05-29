@@ -314,10 +314,17 @@ FOOTPRINTS.forEach(fp => GlobalLibrary.registerFootprint(fp));
 // Map a generated component's partType (and pin count) to a sensible footprint.
 // Returns a footprint id known to exist in the library, or null to let board.ts
 // synthesize pads from the component's logical pins.
-export function resolveFootprintForPart(partType: string | undefined, pinCount: number): string | null {
+export function resolveFootprintForPart(partType: string | undefined, pinCount: number, value?: string): string | null {
   const t = (partType || "").toUpperCase();
+  const v = (value || "").toUpperCase();
 
-  const has = (...keys: string[]) => keys.some(k => t.includes(k));
+  const has = (...keys: string[]) => keys.some(k => t.includes(k) || v.includes(k));
+  // partType-only match — for descriptive category words that would be unsafe to
+  // match against a free-form value (e.g. an op-amp valued "TSV912_RFID_AFE").
+  const hasT = (...keys: string[]) => keys.some(k => t.includes(k));
+  // Value-only match — used for specific chip part numbers where the AI often
+  // mislabels partType (e.g. a CC1101 radio emitted with partType "ESP32").
+  const hasV = (...keys: string[]) => keys.some(k => v.includes(k));
 
   // Passives
   if (has("RESISTOR", "RES")) return "FP_0603";
@@ -338,14 +345,22 @@ export function resolveFootprintForPart(partType: string | undefined, pinCount: 
   if (has("HEADER_4", "HDR_4", "4PIN")) return "FP_HDR_4x1";
   if (has("HEADER", "HDR", "2PIN", "BUTTON", "SWITCH", "RELAY", "JST", "CONNECTOR")) return "FP_HDR_2x1";
 
-  // ICs / MCUs / radios — choose by pin count
-  if (has("ESP32", "WROOM", "WROVER", "MODULE")) return "FP_MODULE_WROOM";
-  if (has("STM32", "MCU", "MICROCONTROLLER", "PROCESSOR", "FPGA", "ESP", "RP2040", "ATMEGA", "PIC")) {
+  // ICs / MCUs / radios — choose by pin count.
+  // Specific bare RF / NFC transceiver chips → small QFN. Checked FIRST (and by
+  // value, since the AI frequently mislabels these as partType "ESP32") so they
+  // never fall through to the large castellated module footprint below.
+  if (hasV("CC1101", "ST25R", "PN532", "NRF24", "NRF52", "RFM69", "RFM95", "SX1276", "SX1262", "SI4463")
+      || hasT("RADIO", "TRANSCEIVER", "NFC", "RFID")) {
+    return "FP_QFN32";
+  }
+  // Actual castellated modules only (e.g. ESP32-WROOM/WROVER). A bare ESP32 chip
+  // (no module marker) falls through to the QFN MCU branch below.
+  if (has("WROOM", "WROVER", "MODULE")) return "FP_MODULE_WROOM";
+  if (has("ESP32", "STM32", "MCU", "MICROCONTROLLER", "PROCESSOR", "FPGA", "ESP", "RP2040", "ATMEGA", "PIC")) {
     if (pinCount > 48) return "FP_LQFP64";
     if (pinCount > 32) return "FP_LQFP48";
     return "FP_QFN32";
   }
-  if (has("CC1101", "NRF", "RADIO", "RF", "TRANSCEIVER", "ST25R", "NFC", "PN532")) return "FP_QFN32";
   if (has("OPAMP", "OP_AMP", "AMPLIFIER", "COMPARATOR")) return pinCount <= 5 ? "FP_SOT23_5" : "FP_SOIC8";
   if (has("SENSOR", "ADC", "DAC", "EEPROM", "FLASH", "RTC", "IC")) return pinCount > 8 ? "FP_SOIC14" : "FP_SOIC8";
 
