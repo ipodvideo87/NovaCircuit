@@ -836,6 +836,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
   const executionTraces = useRef<AIExecutionTrace[]>([]);
 
   const lastInteractionTime = useRef<number>(0);
+  const isSettingStoreGraph = useRef<boolean>(false);
   const [activeModal, setActiveModal] = useState<'bom' | 'share' | 'settings' | 'new_project' | null>(null);
   const [showCloudVault, setShowCloudVault] = useState(false);
   const [touchMode, setTouchMode] = useState<'pan' | 'edit'>('edit');
@@ -941,6 +942,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
   // Synchronize local active graph with central Zustand store
   const setStoreGraph = useProjectStore(state => state.setGraph);
   useEffect(() => {
+    isSettingStoreGraph.current = true;
     setStoreGraph(activeGraph);
   }, [activeGraph, setStoreGraph]);
 
@@ -1119,8 +1121,13 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
   }, [setNodes, setEdges]);
 
   // Synchronize incoming remote peer edits into the local transaction manager
+  // (skip when the change was initiated by this component's own setStoreGraph call)
   const storeGraph = useProjectStore(state => state.graph);
   useEffect(() => {
+    if (isSettingStoreGraph.current) {
+      isSettingStoreGraph.current = false;
+      return;
+    }
     const activeStr = JSON.stringify(transientActiveGraph);
     const storeStr = JSON.stringify(storeGraph);
     if (activeStr !== storeStr) {

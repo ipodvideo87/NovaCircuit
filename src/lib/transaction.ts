@@ -62,11 +62,10 @@ export function useTransactionManager(initialState: ProjectGraph, maxHistory = 5
   const interactionBaseRef = useRef<ProjectGraph | null>(null);
   const isInsideInteractionRef = useRef(false);
 
-  // Sync active component layout when initial changes occur or history updates
+  // Keep refs in sync with state (setActiveGraph is handled directly by commitTransaction/undo/redo)
   useEffect(() => {
     historyRef.current = history;
     indexRef.current = currentIndex;
-    setActiveGraph(deepCloneGraph(history[currentIndex]));
   }, [history, currentIndex]);
 
   // Throttle autosaves
