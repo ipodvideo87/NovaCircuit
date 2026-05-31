@@ -59,7 +59,11 @@ export class LayerCompositor {
     "B.Cu": 0.5,
     "F.Silkscreen": 0.8,
     "B.Silkscreen": 0.3,
-    "Edge.Cuts": 1.0
+    "Edge.Cuts": 1.0,
+    "F.Mask": 0.4,
+    "B.Mask": 0.4,
+    "F.Paste": 0.5,
+    "B.Paste": 0.5
   };
 
   public getLayers(): BoardLayer[] {

@@ -564,5 +564,112 @@ export function runDRC(board: PCBBoard): DRCViolation[] {
     });
   }
 
+  // 14. Copper Zone Clearance and Thermal Connection Validation
+  if (board.polygonPours && board.polygonPours.length > 0) {
+    board.polygonPours.forEach(pour => {
+      const pourLayer = pour.layer;
+      const pourNetId = pour.netId;
+      const pourClearance = pour.clearance ?? 0.3;
+
+      // Verify outlinePoints exist
+      if (!pour.outlinePoints || pour.outlinePoints.length < 3) return;
+
+      // A helper to find distance from a point to the polygon edge
+      const getDistanceToPourBoundary = (pt: { x: number, y: number }) => {
+        let minDist = Infinity;
+        for (let i = 0; i < pour.outlinePoints.length; i++) {
+          const p1 = pour.outlinePoints[i];
+          const p2 = pour.outlinePoints[(i + 1) % pour.outlinePoints.length];
+          const seg = { startX: p1.x, startY: p1.y, endX: p2.x, endY: p2.y };
+          const d = getDistanceToSegment(pt, seg);
+          if (d < minDist) minDist = d;
+        }
+        return minDist;
+      };
+
+      // A helper to find segment-to-pour boundary distance
+      const getSegmentToPourBoundaryDistance = (seg: { startX: number, startY: number, endX: number, endY: number }) => {
+        let minDist = Infinity;
+        for (let i = 0; i < pour.outlinePoints.length; i++) {
+          const p1 = pour.outlinePoints[i];
+          const p2 = pour.outlinePoints[(i + 1) % pour.outlinePoints.length];
+          const s2 = { startX: p1.x, startY: p1.y, endX: p2.x, endY: p2.y };
+          const d = segmentToSegmentDistance(seg, s2);
+          if (d < minDist) minDist = d;
+        }
+        return minDist;
+      };
+
+      // A helper to check if a point is inside the polygon (ray casting)
+      const isPointInsidePour = (pt: { x: number, y: number }) => {
+        let inside = false;
+        for (let i = 0, j = pour.outlinePoints.length - 1; i < pour.outlinePoints.length; j = i++) {
+          const xi = pour.outlinePoints[i].x, yi = pour.outlinePoints[i].y;
+          const xj = pour.outlinePoints[j].x, yj = pour.outlinePoints[j].y;
+          const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
+            (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
+          if (intersect) inside = !inside;
+        }
+        return inside;
+      };
+
+      // Check traces of different nets on the same layer
+      board.traces.forEach(t => {
+        if (t.layer === pourLayer && t.netId !== pourNetId) {
+          const d = getSegmentToPourBoundaryDistance(t);
+          const isInside = isPointInsidePour({ x: (t.startX + t.endX)/2, y: (t.startY + t.endY)/2 });
+          
+          if (d < pourClearance || isInside) {
+            const trackNetName = board.nets.find(n => n.id === t.netId)?.name || t.netId;
+            const pourNetName = board.nets.find(n => n.id === pourNetId)?.name || pourNetId;
+            violations.push({
+              id: `drc-zone-trace-${pour.id}-${t.id}`,
+              type: "clearance",
+              message: `Copper Zone Clearance: Trace Segment of net '${trackNetName}' on ${t.layer} violates spacing clearance of ${pourClearance}mm with Copper Pour Zone '${pourNetName}'`,
+              elements: [t.id, pour.id]
+            });
+          }
+        }
+      });
+
+      // Check pads of different nets on the same layer
+      allPads.forEach(p => {
+        if (p.layer === pourLayer && p.netId !== pourNetId) {
+          const d = getDistanceToPourBoundary({ x: p.x, y: p.y });
+          const rad = Math.max(p.width, p.height) / 2;
+          const actualCl = d - rad;
+          const isInside = isPointInsidePour({ x: p.x, y: p.y });
+
+          if (actualCl < pourClearance || isInside) {
+            const padNetName = board.nets.find(n => n.id === p.netId)?.name || p.netId;
+            const pourNetName = board.nets.find(n => n.id === pourNetId)?.name || pourNetId;
+            violations.push({
+              id: `drc-zone-pad-${pour.id}-${p.componentId}-${p.id}`,
+              type: "clearance",
+              message: `Copper Zone Clearance: Component Pad ${p.designator}.${p.id} of net '${padNetName}' on ${pourLayer} violates spacing clearance of ${pourClearance}mm with Copper Pour Zone '${pourNetName}'`,
+              elements: [p.componentId, pour.id]
+            });
+          }
+        }
+      });
+
+      // Check keepout zones within this pour zone
+      board.keepouts.forEach(keepout => {
+        const keepoutCenterX = keepout.x + keepout.width/2;
+        const keepoutCenterY = keepout.y + keepout.height/2;
+        const isInside = isPointInsidePour({ x: keepoutCenterX, y: keepoutCenterY });
+        if (isInside && keepout.restrictions.includes("pour")) {
+          const pourNetName = board.nets.find(n => n.id === pourNetId)?.name || pourNetId;
+          violations.push({
+            id: `drc-zone-keepout-${pour.id}-${keepout.id}`,
+            type: "keepout",
+            message: `Keepout Zone Overlap: Copper Pour Zone '${pourNetName}' overlaps with restricted Keepout Zone '${keepout.id}'`,
+            elements: [pour.id, keepout.id]
+          });
+        }
+      });
+    });
+  }
+
   return violations;
 }

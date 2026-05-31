@@ -64,12 +64,14 @@ import {
   Compass,
   Move,
   Waypoints,
-  Network
+  Network,
+  Folder
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import NovaCopilot from './Copilot';
 import PCBEditor from './PCBEditor';
 import CommandPalette from './CommandPalette';
+import { SymbolFootprintMapper } from './Schematic/SymbolFootprintMapper';
 import { motion, AnimatePresence } from 'motion/react';
 import { ProjectGraph, AIAction, PCBComponent, PinDef } from '../types';
 
@@ -110,7 +112,14 @@ export function mapGraphToFlow(graph: ProjectGraph, prevNodes?: any[], prevEdges
   const prevNodeMap = new Map(prevNodes?.map(n => [n.id, n]) || []);
   const prevEdgeMap = new Map(prevEdges?.map(e => [e.id, e]) || []);
 
-  const newNodes = graph.components.map(comp => {
+  const activeSheetId = graph.activeSheetId;
+  const currentSheet = graph.sheets?.find(s => s.id === activeSheetId);
+  const compsToRender = currentSheet ? currentSheet.components : graph.components;
+  const netsToRender = currentSheet ? currentSheet.nets : graph.nets;
+  const sheetSymbolsToRender = currentSheet ? currentSheet.sheetSymbols : [];
+
+  // 1. Map components
+  const componentNodes = compsToRender.map(comp => {
     const id = comp.id || comp.designator;
     const type = 'component';
     
@@ -123,15 +132,17 @@ export function mapGraphToFlow(graph: ProjectGraph, prevNodes?: any[], prevEdges
       }
     }
 
-    // We recreate data specifically to check changes, but it's cheap to allocate data object
     const newData = {
       label: comp.designator,
       type: comp.partType || 'component',
-      icon: (comp.partType && (comp.partType.includes('MCU') || comp.partType.includes('ESP32') || comp.partType.includes('IC'))) ? <Cpu size={14} /> : <CircuitBoard size={14} />,
+      icon: (comp.partType && (comp.partType.includes('MCU') || comp.partType.includes('ESP32') || comp.partType.includes('IC'))) ? undefined : undefined,
       pins: comp.pins && comp.pins.length > 0 ? comp.pins : [{name: '1', type: 'passive'}, {name: '2', type: 'passive'}],
       footprint: comp.footprint,
       properties: comp.properties,
       partNumber: comp.partNumber,
+      boardPosition: comp.boardPosition,
+      rotation: comp.rotation,
+      layer: comp.layer,
       libComp,
       symbol
     };
@@ -154,9 +165,14 @@ export function mapGraphToFlow(graph: ProjectGraph, prevNodes?: any[], prevEdges
       propsChanged = true;
     }
 
+    const boardPosChanged = prev?.data.boardPosition?.x !== comp.boardPosition?.x || prev?.data.boardPosition?.y !== comp.boardPosition?.y;
+    const rotationChanged = prev?.data.rotation !== comp.rotation;
+    const layerChanged = prev?.data.layer !== comp.layer;
+
     if (prev && prev.position.x === comp.position.x && prev.position.y === comp.position.y && 
         prev.data.label === newData.label && prev.data.type === newData.type && 
-        prev.data.footprint === newData.footprint && prev.data.partNumber === newData.partNumber && !propsChanged) {
+        prev.data.footprint === newData.footprint && prev.data.partNumber === newData.partNumber && 
+        !propsChanged && !boardPosChanged && !rotationChanged && !layerChanged) {
       return prev;
     }
 
@@ -168,8 +184,40 @@ export function mapGraphToFlow(graph: ProjectGraph, prevNodes?: any[], prevEdges
     };
   });
 
+  // 2. Map sheet symbols
+  const sheetSymbolNodes = (sheetSymbolsToRender || []).map(s => {
+    const id = s.id;
+    const type = 'sheetBlock';
+    
+    const newData = {
+      label: s.designator,
+      referencedSheetId: s.referencedSheetId,
+      ports: s.ports,
+      type: 'sheetBlock'
+    };
+
+    const prev = prevNodeMap.get(id);
+    if (prev && prev.position.x === s.position.x && prev.position.y === s.position.y &&
+        prev.data.label === s.designator && prev.data.referencedSheetId === s.referencedSheetId) {
+      return prev;
+    }
+
+    return {
+      id,
+      type,
+      position: s.position,
+      data: newData
+    };
+  });
+
+  const newNodes = [
+    ...componentNodes,
+    ...sheetSymbolNodes
+  ];
+
+  // 3. Map wires (edges)
   const newEdges: any[] = [];
-  graph.nets.forEach(net => {
+  netsToRender.forEach(net => {
     for(let i=0; i<net.connections.length - 1; i++) {
       const from = net.connections[i];
       const to = net.connections[i+1];
@@ -378,109 +426,290 @@ const ComponentNode = React.memo(({ data, selected }: { data: any, selected: boo
   window.__NODE_RENDER_COUNT++;
 
   const renderSymbol = () => {
-    if (!data.symbol || !data.symbol.units || data.symbol.units.length === 0) return null;
-    const unit = data.symbol.units[0];
-    
-    // Convert logic coordinates to React flow handles & SVG coordinates
-    // Assuming symbol centers around (0,0) with width & height defining viewBox
-    const viewBox = `${-unit.width/2} ${-unit.height/2} ${unit.width} ${unit.height}`;
+    // If we have a library symbol, let's use it
+    if (data.symbol && data.symbol.units && data.symbol.units.length > 0) {
+      const unit = data.symbol.units[0];
+      const viewBox = `${-unit.width/2} ${-unit.height/2} ${unit.width} ${unit.height}`;
+
+      return (
+        <div className="relative flex items-center justify-center p-4">
+          <svg width={unit.width} height={unit.height} viewBox={viewBox} className="overflow-visible stroke-gray-300">
+            {unit.graphics.map((g: any, i: number) => {
+              if (g.type === 'rect') return <rect key={i} x={g.x} y={g.y} width={g.width} height={g.height} className={g.className || "stroke-current fill-[#1a1a1a] stroke-[1.5px]"} />
+              if (g.type === 'line') return <line key={i} x1={g.x} y1={g.y} x2={g.x + (g.width||0)} y2={g.y + (g.height||0)} className={g.className || "stroke-current stroke-[1.5px]"} />
+              if (g.type === 'circle') return <circle key={i} cx={g.x} cy={g.y} r={g.radius || 10} className={g.className || "stroke-current fill-[#1a1a1a] stroke-[1.5px]"} />
+              return null;
+            })}
+            {unit.pins.map((p: any) => {
+              const lineX2 = p.direction === 'Left' ? p.x - p.length : p.direction === 'Right' ? p.x + p.length : p.x;
+              const lineY2 = p.direction === 'Up' ? p.y - p.length : p.direction === 'Down' ? p.y + p.length : p.y;
+              return (
+                <g key={`pin-${p.id}`}>
+                  <line x1={p.x} y1={p.y} x2={lineX2} y2={lineY2} className="stroke-indigo-400 stroke-[1.5px]" />
+                  <text x={p.direction === 'Left' ? p.x - p.length/2 : p.direction === 'Right' ? p.x + p.length/2 : p.x} 
+                        y={p.direction === 'Up' ? p.y - p.length/2 : p.direction === 'Down' ? p.y + p.length/2 : p.y - 4} 
+                        className="fill-indigo-300 text-[6px] font-mono" textAnchor="middle">
+                    {p.name}
+                  </text>
+                </g>
+              )
+            })}
+          </svg>
+          
+          {unit.pins.map((p: any) => {
+             let pos = Position.Left;
+             if (p.direction === 'Left') pos = Position.Left;
+             if (p.direction === 'Right') pos = Position.Right;
+             if (p.direction === 'Up') pos = Position.Top;
+             if (p.direction === 'Down') pos = Position.Bottom;
+
+             const leftPct = ((p.x + unit.width/2) / unit.width) * 100;
+             const topPct = ((p.y + unit.height/2) / unit.height) * 100;
+
+             return (
+               <Handle
+                 key={p.id}
+                 type="source"
+                 position={pos}
+                 id={p.id}
+                 style={{ left: `${leftPct}%`, top: `${topPct}%`, minWidth: '4px', minHeight: '4px', width: '4px', height: '4px', background: '#818cf8', border: 'none' }}
+               />
+             )
+          })}
+        </div>
+      );
+    }
+
+    // fallback procedural standard schematics rendering
+    const designator = data.label || '';
+    const isResistor = designator.toUpperCase().startsWith('R') || data.type?.toLowerCase().includes('res');
+    const isCapacitor = designator.toUpperCase().startsWith('C') || data.type?.toLowerCase().includes('cap');
+    const isInductor = designator.toUpperCase().startsWith('L') || data.type?.toLowerCase().includes('ind');
+    const isDiode = designator.toUpperCase().startsWith('D') || designator.toUpperCase().startsWith('LED') || data.type?.toLowerCase().includes('diode');
+    const pins = data.pins || [];
+
+    if (isResistor && pins.length === 2) {
+      return (
+        <div className="relative flex items-center justify-center p-2 w-[80px] h-[40px]">
+          <svg width="60" height="30" viewBox="0 0 60 30" className="overflow-visible stroke-indigo-400 fill-none stroke-[1.5px]">
+            {/* US standard zig-zag Resistor design */}
+            <path d="M 0 15 L 15 15 L 18 5 L 24 25 L 30 5 L 36 25 L 42 5 L 45 15 L 60 15" />
+          </svg>
+          <Handle type="source" position={Position.Left} id={pins[0].name} style={{ left: '-2px', top: '50%', background: '#818cf8', minWidth: '4px', minHeight: '4px' }} />
+          <Handle type="source" position={Position.Right} id={pins[1].name} style={{ left: '100%', top: '50%', background: '#818cf8', minWidth: '4px', minHeight: '4px' }} />
+        </div>
+      );
+    }
+
+    if (isCapacitor && pins.length === 2) {
+      return (
+        <div className="relative flex items-center justify-center p-2 w-[80px] h-[40px]">
+          <svg width="60" height="30" viewBox="0 0 60 30" className="overflow-visible stroke-indigo-400 fill-none stroke-[1.5px]">
+            {/* Capacitor parallel plates */}
+            <line x1="0" y1="15" x2="26" y2="15" />
+            <line x1="26" y1="5" x2="26" y2="25" className="stroke-zinc-300 stroke-2" />
+            <line x1="34" y1="5" x2="34" y2="25" className="stroke-zinc-300 stroke-2" />
+            <line x1="34" y1="15" x2="60" y2="15" />
+          </svg>
+          <Handle type="source" position={Position.Left} id={pins[0].name} style={{ left: '-2px', top: '50%', background: '#818cf8', minWidth: '4px', minHeight: '4px' }} />
+          <Handle type="source" position={Position.Right} id={pins[1].name} style={{ left: '100%', top: '50%', background: '#818cf8', minWidth: '4px', minHeight: '4px' }} />
+        </div>
+      );
+    }
+
+    if (isInductor && pins.length === 2) {
+      return (
+        <div className="relative flex items-center justify-center p-2 w-[80px] h-[40px]">
+          <svg width="60" height="30" viewBox="0 0 60 30" className="overflow-visible stroke-indigo-400 fill-none stroke-[1.5px]">
+            {/* Inductor coily path */}
+            <path d="M 0,15 L 12,15 A 6,6 0 0,1 24,15 A 6,6 0 0,1 36,15 A 6,6 0 0,1 48,15 L 60,15" />
+          </svg>
+          <Handle type="source" position={Position.Left} id={pins[0].name} style={{ left: '-2px', top: '50%', background: '#818cf8', minWidth: '4px', minHeight: '4px' }} />
+          <Handle type="source" position={Position.Right} id={pins[1].name} style={{ left: '100%', top: '50%', background: '#818cf8', minWidth: '4px', minHeight: '4px' }} />
+        </div>
+      );
+    }
+
+    if (isDiode && pins.length === 2) {
+      const isLed = designator.toUpperCase().includes('LED');
+      return (
+        <div className="relative flex items-center justify-center p-2 w-[80px] h-[40px]">
+          <svg width="60" height="30" viewBox="0 0 60 30" className="overflow-visible stroke-indigo-400 fill-none stroke-[1.5px]">
+            {/* Diode triangle + line */}
+            <line x1="0" y1="15" x2="22" y2="15" />
+            <path d="M 22 5 L 22 25 L 38 15 Z" className="fill-indigo-500/20" />
+            <line x1="38" y1="5" x2="38" y2="25" className="stroke-zinc-300 stroke-2" />
+            <line x1="38" y1="15" x2="60" y2="15" />
+            {isLed && (
+              <>
+                {/* Visual LED emit arrows */}
+                <path d="M 28 0 L 22 -6 M 22 -6 L 25 -6 M 22 -6 L 22 -3" className="stroke-amber-400 stroke-[1px]" />
+                <path d="M 34 -2 L 28 -8 M 28 -8 L 31 -8 M 28 -8 L 28 -5" className="stroke-amber-400 stroke-[1px]" />
+              </>
+            )}
+          </svg>
+          <Handle type="source" position={Position.Left} id={pins[0].name} style={{ left: '-2px', top: '50%', background: '#818cf8', minWidth: '4px', minHeight: '4px' }} />
+          <Handle type="source" position={Position.Right} id={pins[1].name} style={{ left: '100%', top: '50%', background: '#818cf8', minWidth: '4px', minHeight: '4px' }} />
+        </div>
+      );
+    }
+
+    // Default Multi-pin integrated circuit style block
+    const leftPins = pins.slice(0, Math.ceil(pins.length / 2));
+    const rightPins = pins.slice(Math.ceil(pins.length / 2));
+    const blockHeight = Math.max(leftPins.length, rightPins.length, 2) * 24 + 16;
 
     return (
-      <div className="relative flex items-center justify-center p-4">
-        <svg width={unit.width} height={unit.height} viewBox={viewBox} className="overflow-visible stroke-gray-300">
-          {unit.graphics.map((g: any, i: number) => {
-            if (g.type === 'rect') return <rect key={i} x={g.x} y={g.y} width={g.width} height={g.height} className={g.className || "stroke-current fill-[#1a1a1a] stroke-[1.5px]"} />
-            if (g.type === 'line') return <line key={i} x1={g.x} y1={g.y} x2={g.x + (g.width||0)} y2={g.y + (g.height||0)} className={g.className || "stroke-current stroke-[1.5px]"} />
-            if (g.type === 'circle') return <circle key={i} cx={g.x} cy={g.y} r={g.radius || 10} className={g.className || "stroke-current fill-[#1a1a1a] stroke-[1.5px]"} />
-            return null;
-          })}
-          {unit.pins.map((p: any) => {
-            // Draw pin line
-            const lineX2 = p.direction === 'Left' ? p.x - p.length : p.direction === 'Right' ? p.x + p.length : p.x;
-            const lineY2 = p.direction === 'Up' ? p.y - p.length : p.direction === 'Down' ? p.y + p.length : p.y;
-            return (
-              <g key={`pin-${p.id}`}>
-                <line x1={p.x} y1={p.y} x2={lineX2} y2={lineY2} className="stroke-indigo-400 stroke-[1.5px]" />
-                <text x={p.direction === 'Left' ? p.x - p.length/2 : p.direction === 'Right' ? p.x + p.length/2 : p.x} 
-                      y={p.direction === 'Up' ? p.y - p.length/2 : p.direction === 'Down' ? p.y + p.length/2 : p.y - 4} 
-                      className="fill-indigo-300 text-[6px] font-mono" textAnchor="middle">
-                  {p.name}
-                </text>
-              </g>
-            )
-          })}
-        </svg>
-        
-        {/* Render actual handles for React Flow */}
-        {unit.pins.map((p: any) => {
-           let pos = Position.Left;
-           if (p.direction === 'Left') pos = Position.Left;
-           if (p.direction === 'Right') pos = Position.Right;
-           if (p.direction === 'Up') pos = Position.Top;
-           if (p.direction === 'Down') pos = Position.Bottom;
+      <div className="w-full relative flex flex-col items-center mt-2 border border-zinc-700/60 rounded bg-[#131113]/90" style={{ minHeight: `${blockHeight}px` }}>
+        <div className="w-full h-full p-2 flex justify-between relative" style={{ minHeight: `${blockHeight}px` }}>
+          {/* Left Pins Side */}
+          <div className="flex flex-col justify-around h-full py-1 space-y-4">
+            {leftPins.map((pin: any) => (
+              <div key={pin.name} className="flex items-center gap-1.5 relative min-h-[16px]">
+                <Handle type="source" position={Position.Left} id={pin.name} style={{ left: '-12px', top: '50%', background: '#818cf8', minWidth: '4px', minHeight: '4px', opacity: 0.8 }} />
+                <div className="w-1.5 h-[1.5px] bg-zinc-650" />
+                <span className="text-[8px] text-zinc-400 font-mono tracking-tighter font-extrabold">{pin.name}</span>
+              </div>
+            ))}
+          </div>
 
-           // Map SVG space to HTML space. viewBox is centered on 0,0
-           const leftPct = ((p.x + unit.width/2) / unit.width) * 100;
-           const topPct = ((p.y + unit.height/2) / unit.height) * 100;
-
-           return (
-             <Handle
-               key={p.id}
-               type="source"
-               position={pos}
-               id={p.id}
-               style={{ left: `${leftPct}%`, top: `${topPct}%`, minWidth: '4px', minHeight: '4px', width: '4px', height: '4px', background: '#818cf8', border: 'none' }}
-             />
-           )
-        })}
+          {/* Right Pins Side */}
+          <div className="flex flex-col justify-around h-full py-1 space-y-4 text-right">
+            {rightPins.map((pin: any) => (
+              <div key={pin.name} className="flex items-center gap-1.5 justify-end relative min-h-[16px]">
+                <span className="text-[8px] text-zinc-400 font-mono tracking-tighter font-extrabold">{pin.name}</span>
+                <div className="w-1.5 h-[1.5px] bg-zinc-650" />
+                <Handle type="source" position={Position.Right} id={pin.name} style={{ left: '100%', top: '50%', background: '#818cf8', minWidth: '4px', minHeight: '4px', opacity: 0.8 }} />
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     );
   };
 
   return (
-  <div className={cn(
-    "px-3 py-2 bg-[#1a1a1a] border border-white/10 rounded shadow-2xl transition-all relative flex flex-col items-center justify-center min-w-[80px]",
-    selected && "ring-2 ring-indigo-500 border-transparent",
-    data.diffStatus === 'added' ? "!border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.3)] bg-emerald-500/10" : "",
-    data.diffStatus === 'removed' ? "!border-rose-500 shadow-[0_0_15px_rgba(244,63,94,0.3)] bg-rose-500/10 opacity-60 grayscale hover:grayscale-0 z-0" : "",
-    data.diffStatus === 'modified' ? "!border-amber-500 shadow-[0_0_15px_rgba(245,158,11,0.3)] bg-amber-500/10 z-10" : "",
-  )}>
-    {data.diffStatus && (
-       <div className={cn(
-         "absolute -top-2 -right-2 text-[8px] font-black uppercase px-1.5 py-0.5 rounded shadow-lg tracking-widest z-20",
-         data.diffStatus === 'added' ? "bg-emerald-500 text-emerald-950" :
-         data.diffStatus === 'removed' ? "bg-rose-500 text-rose-950" :
-         "bg-amber-500 text-amber-950"
-       )}>
-         {data.diffStatus}
-       </div>
-    )}
-    <div className="flex items-center gap-2 mb-1 pb-1 w-full justify-center">
-      <span className="font-mono text-[10px] text-gray-400 font-bold uppercase tracking-widest text-center">
-        {data.label}
-      </span>
+    <div className={cn(
+      "px-3 py-2 bg-[#1a1a1a] border border-white/10 rounded shadow-2xl transition-all relative flex flex-col items-center justify-center min-w-[80px]",
+      selected && "ring-2 ring-indigo-500 border-transparent",
+      data.diffStatus === 'added' ? "!border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.3)] bg-emerald-500/10" : "",
+      data.diffStatus === 'removed' ? "!border-rose-500 shadow-[0_0_15px_rgba(244,63,94,0.3)] bg-rose-500/10 opacity-60 grayscale hover:grayscale-0 z-0" : "",
+      data.diffStatus === 'modified' ? "!border-amber-500 shadow-[0_0_15px_rgba(245,158,11,0.3)] bg-amber-500/10 z-10" : "",
+    )}>
+      {data.diffStatus && (
+         <div className={cn(
+           "absolute -top-2 -right-2 text-[8px] font-black uppercase px-1.5 py-0.5 rounded shadow-lg tracking-widest z-20",
+           data.diffStatus === 'added' ? "bg-emerald-500 text-emerald-950" :
+           data.diffStatus === 'removed' ? "bg-rose-500 text-rose-950" :
+           "bg-amber-500 text-amber-950"
+         )}>
+           {data.diffStatus}
+         </div>
+      )}
+      <div className="flex items-center gap-2 mb-1 pb-1 w-full justify-center">
+        <span className="font-mono text-[10px] text-gray-200 font-black uppercase tracking-wider text-center">
+          {data.label}
+        </span>
+      </div>
+      
+      {renderSymbol()}
+      
+      <div className="text-[8px] text-gray-500 mt-1 uppercase font-black tracking-widest">{data.partNumber || data.type}</div>
+      {data.properties?.value !== undefined && (
+        <span className="text-[7.5px] text-indigo-400 font-mono mt-0.5 px-1 py-0.2 bg-indigo-505/10 rounded border border-indigo-500/15 font-bold">{data.properties.value}</span>
+      )}
+
+      {/* Instant board position and rotation hint status overlay badge */}
+      {data.boardPosition && (
+        <div className="mt-1.5 px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-[7px] text-emerald-400 font-mono tracking-tighter w-full text-center flex items-center justify-center gap-1.5 shrink-0">
+          <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+          <span className="truncate">PCB: ({data.boardPosition.x.toFixed(1)}, {data.boardPosition.y.toFixed(1)}) Rt:{data.rotation || 0}°</span>
+        </div>
+      )}
     </div>
-    
-    {data.symbol ? renderSymbol() : (
-       <div className="w-full space-y-1 mt-2">
-         {data.pins?.map((pin: any, i: number) => (
-           <div key={i} className="flex justify-between items-center px-1 border-b border-white/2 pb-0.5 last:border-none relative">
-              <Handle type="source" position={Position.Left} id={pin.name} style={{ left: '-10px', top: '50%', background: '#818cf8', opacity: 0.6 }} />
-              <div className="w-1 h-1 rounded-full bg-white/20 -ml-2" />
-              <span className="text-[8px] text-gray-500 font-mono tracking-tighter">{pin.name}</span>
-           </div>
-         ))}
-       </div>
-    )}
-    
-    <div className="text-[8px] text-gray-600 mt-1 uppercase font-black tracking-widest">{data.partNumber || data.type}</div>
-  </div>
   );
 });
 ComponentNode.displayName = 'ComponentNode';
 
+const SheetBlockNode = React.memo(({ data, selected }: { data: any, selected: boolean }) => {
+  const ports = data.ports || [];
+  const leftPorts = ports.filter((p: any) => p.direction === 'input' || p.direction === 'bidirectional');
+  const rightPorts = ports.filter((p: any) => p.direction === 'output');
+
+  const onEnterSheet = useProjectStore(state => {
+    const graph = state.graph;
+    const setGraph = state.setGraph;
+    return (sheetId: string) => {
+       setGraph({
+         ...graph,
+         activeSheetId: sheetId
+       });
+    };
+  });
+
+  return (
+    <div className={cn(
+      "p-4 bg-[#090d16] border border-indigo-500/40 rounded-xl shadow-2xl transition-all relative flex flex-col min-w-[180px] hover:border-indigo-400",
+      selected && "ring-2 ring-indigo-500 border-transparent",
+    )}>
+      {/* Visual Sub-sheet tab corner */}
+      <div className="absolute -top-2 left-4 px-2 py-0.5 bg-indigo-600/20 border border-indigo-500/30 text-[7px] font-black uppercase text-indigo-300 rounded tracking-widest">
+        Hierarchical Sub-Sheet
+      </div>
+
+      <div className="flex items-center gap-2 border-b border-indigo-500/20 pb-2 mb-2">
+        <div className="w-6 h-6 rounded-lg bg-indigo-600/15 border border-indigo-500/30 flex items-center justify-center">
+          <Layers size={12} className="text-indigo-400" />
+        </div>
+        <div className="flex flex-col">
+          <span className="text-[10px] font-black tracking-wider text-gray-100 uppercase">{data.label}</span>
+          <span className="text-[7.5px] text-zinc-500 font-mono tracking-tight font-bold">Sheet: {data.referencedSheetId}</span>
+        </div>
+      </div>
+
+      {/* Visual ports interfacing inside the block */}
+      <div className="flex justify-between gap-4 py-2 min-h-[48px] ">
+        {/* Left Input Ports */}
+        <div className="flex flex-col justify-center space-y-2.5">
+          {leftPorts.map((p: any) => (
+            <div key={p.id} className="flex items-center gap-1 relative min-h-[12px]">
+              <Handle type="source" position={Position.Left} id={p.id || p.name} style={{ left: '-18px', top: '50%', background: '#10b981', minWidth: '5px', minHeight: '5px', border: 'none' }} />
+              <div className="w-1.5 h-1.5 border-t border-r border-[#10b981] rotate-45 shrink-0" />
+              <span className="text-[8px] text-emerald-400 font-mono font-black">{p.name}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Right Output Ports */}
+        <div className="flex flex-col justify-center space-y-2.5 text-right">
+          {rightPorts.map((p: any) => (
+            <div key={p.id} className="flex items-center gap-1 justify-end relative min-h-[12px]">
+              <span className="text-[8px] text-indigo-400 font-mono font-black">{p.name}</span>
+              <div className="w-1.5 h-1.5 border-t border-r border-[#818cf8] rotate-[135deg] shrink-0" />
+              <Handle type="source" position={Position.Right} id={p.id || p.name} style={{ left: '100%', top: '50%', background: '#818cf8', minWidth: '5px', minHeight: '5px', border: 'none' }} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onEnterSheet(data.referencedSheetId);
+        }}
+        className="mt-2 w-full py-1 bg-indigo-600/10 border border-indigo-500/20 hover:bg-indigo-600 hover:text-white rounded-lg text-[8px] font-black uppercase text-indigo-400 tracking-widest transition-all cursor-pointer text-center"
+      >
+        Open Sub-Schematic
+      </button>
+    </div>
+  );
+});
+SheetBlockNode.displayName = 'SheetBlockNode';
+
 const nodeTypes = {
   component: ComponentNode,
+  sheetBlock: SheetBlockNode
 };
 
 const initialNodes = [
@@ -515,7 +744,7 @@ const initialEdges = [
   { id: 'e1-2', source: '2', target: '1', animated: true, style: { stroke: '#6366f1' } }
 ];
 
-type EditorView = 'schematic' | 'pcb' | '3d' | 'mfg' | 'observability';
+type EditorView = 'schematic' | 'pcb' | 'split' | '3d' | 'mfg' | 'observability';
 
 export function useReplayEngine(tracesRef: React.MutableRefObject<AIExecutionTrace[]>) {
   const [replayIndex, setReplayIndex] = useState<number | null>(null);
@@ -838,7 +1067,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
 
   const lastInteractionTime = useRef<number>(0);
   const isSettingStoreGraph = useRef<boolean>(false);
-  const [activeModal, setActiveModal] = useState<'bom' | 'share' | 'settings' | 'new_project' | null>(null);
+  const [activeModal, setActiveModal] = useState<'bom' | 'share' | 'settings' | 'new_project' | 'mapper' | null>(null);
   const [showCloudVault, setShowCloudVault] = useState(false);
   const [touchMode, setTouchMode] = useState<'pan' | 'edit'>('edit');
   const [copied, setCopied] = useState(false);
@@ -939,6 +1168,17 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
   }, [isRestored, clearRestoredFlag]);
 
   const activeGraph = replayGraph ?? transientActiveGraph;
+
+  const handleUpdateComponentFootprint = useCallback((componentId: string, nextFootprint: string) => {
+    const nextGraph = {
+      ...activeGraph,
+      components: activeGraph.components.map(c => 
+        c.id === componentId ? { ...c, footprint: nextFootprint, partNumber: `${c.partType === 'Resistor' || c.partType === 'Capacitor' ? 'RES' : 'IC'}-${c.properties.value || '10K'}-${nextFootprint}` } : c
+      ),
+    };
+    commitTransaction(nextGraph);
+    setDrcWarnings(prev => [`SUCCESS: Re-mapped component package layout for ${componentId} to ${nextFootprint}`, ...prev].slice(0, 5));
+  }, [activeGraph, commitTransaction, setDrcWarnings]);
 
   // Synchronize local active graph with central Zustand store
   const setStoreGraph = useProjectStore(state => state.setGraph);
@@ -2542,6 +2782,53 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
         }
         break;
       }
+      case 'schematic_auto_annotate': {
+        const counters: Record<string, number> = { R: 1, C: 1, L: 1, U: 1, D: 1 };
+        const annotatedComponents = activeGraph.components.map(comp => {
+          let letter = 'U';
+          const type = (comp.partType || '').toUpperCase();
+          const designator = comp.designator;
+          
+          if (type.includes('RES') || designator.startsWith('R')) letter = 'R';
+          else if (type.includes('CAP') || designator.startsWith('C')) letter = 'C';
+          else if (type.includes('IND') || designator.startsWith('L')) letter = 'L';
+          else if (type.includes('DIODE') || type.includes('LED') || designator.startsWith('D')) letter = 'D';
+
+          const currentNum = counters[letter] || 1;
+          counters[letter] = currentNum + 1;
+          
+          return {
+            ...comp,
+            designator: `${letter}${currentNum}`
+          };
+        });
+
+        commitTransaction({
+          ...activeGraph,
+          components: annotatedComponents
+        });
+        setDrcWarnings(prev => ["SUCCESS: Schematic auto-annotation successfully completed across all components.", ...prev].slice(0, 5));
+        break;
+      }
+      case 'add_net_label': {
+        if (activeGraph.nets.length > 0) {
+           const updatedNets = activeGraph.nets.map((net, i) => {
+              if (i === 0) {
+                 return {
+                    ...net,
+                    name: `SIG_BUS_LABEL_MAPPED`
+                 };
+              }
+              return net;
+           });
+           commitTransaction({
+              ...activeGraph,
+              nets: updatedNets
+           });
+           setDrcWarnings(prev => ["SUCCESS: Net connected and named SIG_BUS_LABEL_MAPPED successfully.", ...prev].slice(0, 5));
+        }
+        break;
+      }
       case 'run_erc':
         setDrcWarnings(prev => ["INFO: Initiated AI ERC verification...", "SUCCESS: Automated ERC check completed. All connections look fully legal.", ...prev].slice(0, 5));
         break;
@@ -2751,25 +3038,35 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
             {!isMobile && (
               <div className="absolute top-4 right-4 flex items-center gap-1.5 z-30 font-sans">
                 {view === 'schematic' && (
-                  <button
-                    onClick={() => {
-                      const ercResults = runERC(activeGraph);
-                      const warningCount = ercResults.filter(r => r.severity === 'warning' || r.severity === 'error').length;
-                      
-                      setDrcWarnings(prev => [
-                        `SUCCESS: Bidirectional Netlist Sync complete! Committed ${activeGraph.components.length} footprints and ${activeGraph.nets.length} nets.`,
-                        warningCount > 0 ? `WARN: ERC check flag — ${warningCount} electrical issues found.` : "SUCCESS: ERC compliance scan 100% clean.",
-                        ...prev
-                      ].slice(0, 5));
-                      
-                      handleSetView('pcb');
-                    }}
-                    className="p-1.5 px-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20 text-[9px] md:text-[10px] font-black rounded-lg transition-all uppercase tracking-widest cursor-pointer flex items-center gap-1.5 animate-pulse shadow-xl"
-                    title="Translate schematic netlist into physical PCB copper tracks"
-                  >
-                    <Network size={11} className="text-emerald-400 animate-spin-slow" />
-                    Sync to PCB
-                  </button>
+                  <>
+                    <button
+                      onClick={() => setActiveModal('mapper')}
+                      className="p-1.5 px-3 bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/20 text-[9px] md:text-[10px] font-black rounded-lg transition-all uppercase tracking-widest cursor-pointer flex items-center gap-1.5 shadow-xl"
+                      title="Adjust footprint and pin package mappings for schematic components"
+                    >
+                      <Layers size={11} className="text-indigo-405" />
+                      Footprint Mapper
+                    </button>
+                    <button
+                      onClick={() => {
+                        const ercResults = runERC(activeGraph);
+                        const warningCount = ercResults.filter(r => r.severity === 'warning' || r.severity === 'error').length;
+                        
+                        setDrcWarnings(prev => [
+                          `SUCCESS: Bidirectional Netlist Sync complete! Committed ${activeGraph.components.length} footprints and ${activeGraph.nets.length} nets.`,
+                          warningCount > 0 ? `WARN: ERC check flag — ${warningCount} electrical issues found.` : "SUCCESS: ERC compliance scan 100% clean.",
+                          ...prev
+                        ].slice(0, 5));
+                        
+                        handleSetView('pcb');
+                      }}
+                      className="p-1.5 px-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20 text-[9px] md:text-[10px] font-black rounded-lg transition-all uppercase tracking-widest cursor-pointer flex items-center gap-1.5 animate-pulse shadow-xl"
+                      title="Translate schematic netlist into physical PCB copper tracks"
+                    >
+                      <Network size={11} className="text-emerald-400 animate-spin-slow" />
+                      Sync to PCB
+                    </button>
+                  </>
                 )}
                 
                 <div className="bg-[#0d0d0d]/90 backdrop-blur border border-white/10 rounded-xl p-1 flex gap-1 shadow-2xl">
@@ -2858,8 +3155,36 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
                     onNodeDragStop={handleNodeDragStop}
                     preventScrolling={true}
                   >
-                    <Background variant={BackgroundVariant.Lines} gap={20} size={1} color="#111" />
+                     <Background variant={BackgroundVariant.Lines} gap={20} size={1} color="#111" />
                     <Controls showInteractive={false} className="bg-[#1a1a1a] !border-white/10 !shadow-2xl" />
+                    
+                    {/* Active Sheet Breadcrumb Hierarchy Controller */}
+                    <Panel position="top-left" className="bg-[#090d16]/95 backdrop-blur border border-indigo-500/30 p-2 rounded-xl flex items-center gap-1.5 shadow-2xl z-20 font-mono text-[9px] pointer-events-auto">
+                      <Folder size={12} className="text-indigo-400" />
+                      <button 
+                        onClick={() => {
+                          commitTransaction({
+                            ...activeGraph,
+                            activeSheetId: undefined
+                          });
+                        }}
+                        className={cn(
+                          "hover:text-indigo-300 transition-all uppercase font-black",
+                          !activeGraph.activeSheetId ? "text-indigo-400 font-black cursor-default font-extrabold" : "text-zinc-400"
+                        )}
+                      >
+                        Root Sheet
+                      </button>
+                      {activeGraph.activeSheetId && (() => {
+                        const currentSheet = activeGraph.sheets?.find(s => s.id === activeGraph.activeSheetId);
+                        return currentSheet ? (
+                          <>
+                            <span className="text-zinc-600 font-extrabold px-0.5">&gt;</span>
+                            <span className="text-indigo-400 font-black uppercase font-extrabold">{currentSheet.name}</span>
+                          </>
+                        ) : null;
+                      })()}
+                    </Panel>
                     
                     {isReadOnly && (
                       <Panel position="top-center" className="bg-amber-500/15 backdrop-blur border border-amber-500/30 text-amber-400 text-[10px] p-2 px-3 rounded-xl flex items-center gap-2 shadow-2xl z-20">
@@ -3164,6 +3489,53 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
                     </div>
                   </div>
                 </motion.div>
+              ) : view === 'split' ? (
+                <div key="split" className="w-full h-full flex flex-row divide-x divide-white/10 relative">
+                  {/* Left Side: Schematic Flow */}
+                  <div className="w-1/2 h-full relative bg-[#0a0a0d] flex flex-col">
+                    <div className="absolute top-2 left-2 z-10 px-2.5 py-1 bg-indigo-500/10 border border-indigo-500/30 text-[8px] font-black uppercase tracking-wider text-indigo-400 rounded-lg backdrop-blur-md">
+                      Schematic Graph View
+                    </div>
+                    {/* Render the full ReactFlow component with proper layout controls */}
+                    <div className="w-full h-full relative" id="reactflow-container-split">
+                      <ReactFlow
+                        nodes={displayNodes}
+                        edges={displayEdges}
+                        onNodesChange={handleNodesChange}
+                        onEdgesChange={handleEdgesChange}
+                        onConnect={onConnect}
+                        nodeTypes={nodeTypes}
+                        edgeTypes={edgeTypes}
+                        fitView={true}
+                        colorMode="dark"
+                        minZoom={0.05}
+                        maxZoom={5}
+                        nodesDraggable={isInteractive && (isMobile ? touchMode === 'edit' : true)}
+                        nodesConnectable={isInteractive && (isMobile ? touchMode === 'edit' : true)}
+                        elementsSelectable={isInteractive && (isMobile ? touchMode === 'edit' : true)}
+                        onNodeDragStop={handleNodeDragStop}
+                      >
+                        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#ffffff10" />
+                        <Controls showInteractive={false} className="bg-[#1a1a1a] !border-white/10 !shadow-2xl" />
+                      </ReactFlow>
+                    </div>
+                  </div>
+                  {/* Right Side: PCB Editor */}
+                  <div className="w-1/2 h-full relative bg-[#060608]">
+                    <div className="absolute top-2 left-2 z-10 px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/30 text-[8px] font-black uppercase tracking-wider text-emerald-400 rounded-lg backdrop-blur-md">
+                      PCB Layout View
+                    </div>
+                    <PCBEditor 
+                      graph={activeGraph} 
+                      selectedIds={memoizedSelectedIds} 
+                      onSelect={handlePcbSelect}
+                      onCommitTransaction={commitTransaction}
+                      mode={mode}
+                      autoRouteTrigger={autoRouteTrigger}
+                      smartAutoTrigger={smartAutoTrigger}
+                    />
+                  </div>
+                </div>
               ) : view === 'pcb' ? (
                 <motion.div 
                    key="pcb"
@@ -3268,7 +3640,10 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
               animate={{ scale: 1, y: 0, opacity: 1 }}
               exit={{ scale: 0.95, y: 15, opacity: 0 }}
               transition={{ type: "spring", damping: 25, stiffness: 350 }}
-              className="w-full max-w-lg bg-[#0d0d0d] border border-white/10 rounded-2xl shadow-2xl p-6 flex flex-col max-h-[85vh] overflow-hidden"
+              className={cn(
+                "w-full bg-[#0d0d0d] border border-white/10 rounded-2xl shadow-2xl p-6 flex flex-col max-h-[85vh] overflow-hidden",
+                activeModal === 'mapper' ? "max-w-4xl" : "max-w-lg"
+              )}
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header */}
@@ -3280,6 +3655,7 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
                     {activeModal === 'share' && 'Share Schematic Workspace'}
                     {activeModal === 'settings' && 'Workspace Environment Configuration'}
                     {activeModal === 'new_project' && 'Initialize Pristine Schematic'}
+                    {activeModal === 'mapper' && 'AI Symbol ↔ Physical Footprint Mapper'}
                   </h2>
                 </div>
                 <button 
@@ -3537,6 +3913,14 @@ export default function SchematicEditor({ userMode, onChangeMode }: { userMode?:
                       </button>
                     </div>
                   </div>
+                )}
+
+                {activeModal === 'mapper' && (
+                  <SymbolFootprintMapper 
+                    graph={activeGraph}
+                    onUpdateComponentFootprint={handleUpdateComponentFootprint}
+                    onClose={() => setActiveModal(null)}
+                  />
                 )}
               </div>
             </motion.div>

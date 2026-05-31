@@ -90,6 +90,26 @@ export function generateGerberRS274X(board: PCBBoard, layer: "F.Cu" | "B.Cu" | "
         }
       });
     });
+
+    // Plot copper zone polygon pours as G36/G37 filled paths
+    if (board.polygonPours && board.polygonPours.length > 0) {
+      board.polygonPours.forEach((pour, idx) => {
+        if (pour.layer === layer && pour.outlinePoints && pour.outlinePoints.length >= 3) {
+          g += `G04 Polygon pour zone ${pour.id} net: ${pour.netId || "unassigned"}* \r\n`;
+          g += `G36* \r\n`; // Start of solid fill contour
+          const pts = pour.outlinePoints;
+          // Move to start point
+          g += `${formatCoord(pts[0].x)}${formatCoordY(pts[0].y)}D02* \r\n`;
+          // Draw other segments
+          for (let i = 1; i < pts.length; i++) {
+            g += `${formatCoord(pts[i].x)}${formatCoordY(pts[i].y)}D01* \r\n`;
+          }
+          // Close contour and trigger dark fill
+          g += `${formatCoord(pts[0].x)}${formatCoordY(pts[0].y)}D01* \r\n`;
+          g += `G37* \r\n`; // End polygon fill
+        }
+      });
+    }
   }
 
   // Plot Silkscreen geometry (Outline boxes + RefDes Text drawing)

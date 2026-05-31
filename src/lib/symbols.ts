@@ -2,10 +2,13 @@ export type PinDirection = "Up" | "Down" | "Left" | "Right";
 
 export interface SymbolGraphic {
   type: "line" | "rect" | "circle" | "polygon" | "text" | "arc";
-  x: number;
-  y: number;
+  x?: number;
+  y?: number;
+  x2?: number;
+  y2?: number;
   width?: number;
   height?: number;
+  layer?: "Silkscreen" | "Courtyard" | "Document";
   radius?: number;
   points?: {x: number, y: number}[];
   text?: string;

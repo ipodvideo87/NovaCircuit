@@ -365,6 +365,28 @@ function applyAction(action: AIAction, graph: ProjectGraph) {
       break;
     }
 
+    case 'create_copper_zone': {
+      if (!graph.polygonPours) graph.polygonPours = [];
+      const { id, netId, layer, outlinePoints, clearance = 0.3, thermalReliefEnabled = true, spokeWidth = 0.25, spokesCount = 4, priority = 0 } = action.args;
+      const generatedId = id || `zone-${Math.random().toString(36).slice(2, 8)}`;
+      if (graph.polygonPours.some(z => z.id === generatedId)) {
+        throw new Error(`Copper zone ID '${generatedId}' already exists.`);
+      }
+      graph.polygonPours.push({
+        id: generatedId,
+        netId,
+        layer,
+        outlinePoints,
+        clearance,
+        minThickness: 0.2,
+        thermalReliefEnabled,
+        spokeWidth,
+        spokesCount,
+        priority
+      });
+      break;
+    }
+
     case 'add_via_stitching': {
       if (!graph.vias) graph.vias = [];
       const { netId, x1, y1, x2, y2, gridSpacing, drillSize, padSize } = action.args;
@@ -470,6 +492,66 @@ function applyAction(action: AIAction, graph: ProjectGraph) {
       graph.components.push(
         { id: `U_SUB_${subNum}`, designator: `U_${blockType}`, partType: blockType, position: { x: 150, y: 150 }, pins: [{name: 'IN', type: 'input'}, {name: 'OUT', type: 'output'}, {name: 'GND', type: 'ground'}] as any[], footprint: 'DIP', properties: {} }
       );
+      break;
+    }
+
+    case 'create_sheet': {
+      const { id, name, parentSheetId = null } = action.args;
+      if (!graph.sheets) graph.sheets = [];
+      if (graph.sheets.some(s => s.id === id)) {
+        throw new Error(`Sheet with ID '${id}' already exists.`);
+      }
+      graph.sheets.push({
+        id,
+        name,
+        parentSheetId,
+        components: [],
+        nets: [],
+        sheetSymbols: [],
+        ports: [],
+        globalLabels: [],
+        offSheetConnectors: []
+      });
+      break;
+    }
+
+    case 'create_sheet_symbol': {
+      const { id, designator, referencedSheetId, x = 100, y = 100, ports = [] } = action.args;
+      const sheetSymbol = { id, designator, referencedSheetId, position: { x, y }, ports };
+      
+      const activeSheetId = graph.activeSheetId;
+      if (activeSheetId) {
+        if (!graph.sheets) graph.sheets = [];
+        const currentSheet = graph.sheets.find(s => s.id === activeSheetId);
+        if (currentSheet) {
+          if (!currentSheet.sheetSymbols) currentSheet.sheetSymbols = [];
+          currentSheet.sheetSymbols.push(sheetSymbol);
+        }
+      } else {
+        if (!graph.sheets) graph.sheets = [];
+        let rootSheet = graph.sheets.find(s => s.id === 'root');
+        if (!rootSheet) {
+          rootSheet = {
+            id: 'root',
+            name: 'Root',
+            parentSheetId: null,
+            components: [...graph.components],
+            nets: [...graph.nets],
+            sheetSymbols: [],
+            ports: [],
+            globalLabels: [],
+            offSheetConnectors: []
+          };
+          graph.sheets.push(rootSheet);
+        }
+        rootSheet.sheetSymbols.push(sheetSymbol);
+      }
+      break;
+    }
+
+    case 'change_active_sheet': {
+      const { sheetId } = action.args;
+      graph.activeSheetId = sheetId;
       break;
     }
 

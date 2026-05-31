@@ -358,7 +358,7 @@ export default function PricingModal() {
             {userProfile ? (
               userProfile.isAdmin ? (
                 <span className="text-indigo-400 font-bold">
-                  Bypass Active: <strong className="text-indigo-300">Jordan / First Eda</strong> Developer Profile with Unlimited Access
+                  Bypass Active: <strong className="text-indigo-300">Jordan / NovaCircuit</strong> Developer Profile with Unlimited Access
                 </span>
               ) : (
                 <span className="text-gray-400">

@@ -25,7 +25,7 @@ export interface ProjectState {
   activeLayer: "F.Cu" | "B.Cu";
   undoHistory: ProjectGraph[];
   redoHistory: ProjectGraph[];
-  viewMode: "schematic" | "pcb";
+  viewMode: "schematic" | "pcb" | "split";
   selectedIds: string[];
   isAIProcessing: boolean;
   routingLogs: string[];
@@ -49,14 +49,19 @@ export interface ProjectState {
   projectId: string | null;
   projectName: string;
   isSaving: boolean;
+  boardWidth: number;
+  boardHeight: number;
+  snapResolution: number; // e.g., 1.0, 0.5, 0.1
 
   // Actions
   setGraph: (graph: ProjectGraph) => void;
   toggleLayer: () => void;
-  setViewMode: (mode: "schematic" | "pcb") => void;
+  setViewMode: (mode: "schematic" | "pcb" | "split") => void;
+  setSnapResolution: (resolution: number) => void;
   setSelectedIds: (ids: string[]) => void;
   saveProject: (name?: string) => Promise<void>;
   loadProjectAndSetup: (projectId: string, name: string, graph: ProjectGraph) => void;
+  updateBoardSize: (width: number, height: number) => void;
   
   commitTransaction: (updatedGraph: ProjectGraph, skipBroadcast?: boolean) => void;
   undo: () => void;
@@ -134,6 +139,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   projectId: null,
   projectName: "Untitled Design",
   isSaving: false,
+  boardWidth: 100,
+  boardHeight: 80,
+  snapResolution: 1.0,
 
   setGraph: (graph) => set({ graph: deepCloneGraph(graph) }),
 
@@ -142,6 +150,26 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   })),
 
   setViewMode: (viewMode) => set({ viewMode }),
+
+  setSnapResolution: (snapResolution) => set({ snapResolution }),
+
+  updateBoardSize: (width: number, height: number) => {
+    const { graph } = get();
+    const newOutline = {
+      points: [
+        { x: 0, y: 0 },
+        { x: width, y: 0 },
+        { x: width, y: height },
+        { x: 0, y: height }
+      ]
+    };
+    const updatedGraph = {
+      ...graph,
+      outline: newOutline
+    };
+    set({ boardWidth: width, boardHeight: height });
+    get().commitTransaction(updatedGraph);
+  },
 
   setSelectedIds: (selectedIds) => {
     set({ selectedIds });

@@ -49,6 +49,8 @@ export default function CommandPalette({ isOpen, onClose, onSelectAction }: Comm
 
   const allCommands: CommandItem[] = [
     { id: 'rotate_selected', icon: <RotateCw size={14} />, label: 'Rotate Selected Component', group: 'Actions', shortcut: 'R' },
+    { id: 'schematic_auto_annotate', icon: <CircuitBoard size={14} />, label: 'Smart Auto-Annotate Schematic', group: 'Tools' },
+    { id: 'add_net_label', icon: <Plus size={14} />, label: 'Add Net Label / Flag', group: 'Tools' },
     { id: 'align_left', icon: <Layers size={14} />, label: 'Align Left', group: 'Layout' },
     { id: 'align_top', icon: <Layers size={14} />, label: 'Align Top', group: 'Layout' },
     { id: 'distribute_h', icon: <Layers size={14} />, label: 'Distribute Horizontally', group: 'Layout' },

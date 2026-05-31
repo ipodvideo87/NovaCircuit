@@ -10,7 +10,9 @@ export type PinType =
   | "power_in"
   | "power_out"
   | "ground"
-  | "passive";
+  | "passive"
+  | "analog"
+  | "unspecified";
 
 export type NetType =
   | "signal"
@@ -29,6 +31,10 @@ export interface ComponentMetadata {
   tolerance?: number;     // %
   packageType?: string;   // e.g., "0805", "SOIC-8"
   temperatureRating?: number; // C
+  manufacturer?: string;
+  mpn?: string;           // Manufacturer Part Number
+  description?: string;
+  value?: string;
 }
 
 export interface PinDef {
@@ -100,7 +106,8 @@ export interface DifferentialPair {
   maxUncoupledLength?: number; // Max length in mm they can run uncoupled
 }
 
-import { BoardTrace, Via, KeepoutZone, BoardOutline } from './lib/board';
+import { BoardTrace, Via, KeepoutZone, BoardOutline, PolygonPourZone } from './lib/board';
+export type { BoardTrace, Via, KeepoutZone, BoardOutline, PolygonPourZone };
 
 /**
  * Hierarchical ports that allow wire connections between sheets.
@@ -169,6 +176,7 @@ export interface ProjectGraph {
   outline?: BoardOutline;
   netClasses?: NetClass[];
   diffPairs?: DifferentialPair[];
+  polygonPours?: PolygonPourZone[];
   
   // Multi-sheet and Hierarchy Support
   sheets?: ProjectSheet[];

@@ -40,13 +40,13 @@ service cloud.firestore {
         && data.ownerId is string && data.ownerId == request.auth.uid
         && data.ownerEmail is string && data.ownerEmail.size() <= 256
         && data.graph is map
-        && (data.componentsCount == null || data.componentsCount is int)
-        && (data.tracesCount == null || data.tracesCount is int)
+        && (data.componentsCount == null || data.componentsCount is int || data.componentsCount is float || data.componentsCount >= 0)
+        && (data.tracesCount == null || data.tracesCount is int || data.tracesCount is float || data.tracesCount >= 0)
         && (data.isPublic == null || data.isPublic is bool);
     }
 
     function isOwnerEmail(email) {
-      return email == 'spankie837@gmail.com' || email.matches('^[a-zA-Z0-9._%+-]+@firsteda\\.com$');
+      return email == 'spankie837@gmail.com' || email.matches('^[a-zA-Z0-9._%+-]+@novacircuit\\.(com|io)$');
     }
 
     function isValidUserProfile(data) {
@@ -54,8 +54,8 @@ service cloud.firestore {
         && data.keys().size() <= 8
         && data.uid is string && data.uid == request.auth.uid
         && data.isPro is bool
-        && data.aiActionsThisMonth is int
-        && data.boardsThisMonth is int
+        && (data.aiActionsThisMonth is int || data.aiActionsThisMonth is float || data.aiActionsThisMonth >= 0)
+        && (data.boardsThisMonth is int || data.boardsThisMonth is float || data.boardsThisMonth >= 0)
         && (data.isAdmin == null || data.isAdmin is bool)
         && (data.stripeCustomerId == null || data.stripeCustomerId is string)
         && (data.updatedAt == null || data.updatedAt is string || data.updatedAt is timestamp);
@@ -109,7 +109,7 @@ service cloud.firestore {
       
       allow create: if isSignedIn() && request.auth.uid == userId && isValidUserProfile(incoming())
         && (
-          ((incoming().isAdmin == true || incoming().isPro == true) ? isOwnerEmail(request.auth.token.email) : (incoming().isAdmin != true && incoming().isPro != true))
+          (!(incoming().isAdmin == true || incoming().isPro == true)) || isOwnerEmail(request.auth.token.email)
         );
 
       allow update: if isSignedIn() && request.auth.uid == userId && isValidUserProfile(incoming())

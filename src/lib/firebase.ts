@@ -105,37 +105,48 @@ testConnection();
 // Load active email profile from Firestore or instantiate a Free Tier baseline
 export async function getOrCreateUserProfile(userId: string, email?: string | null): Promise<UserProfile> {
   const profileRef = doc(db, 'users', userId);
-  const isOwner = !!(email && (email === 'spankie837@gmail.com' || email.endsWith('@novacircuit.io')));
+  const isOwner = !!(email && (email === 'spankie837@gmail.com' || email.endsWith('@novacircuit.io') || email.endsWith('@novacircuit.com')));
+  
+  let snap;
   try {
-    const snap = await getDoc(profileRef);
-    if (snap.exists()) {
-      const data = snap.data() as UserProfile;
-      // If owner but not marked as pro/admin in firestore, auto-upgrade them
-      if (isOwner && (!data.isPro || !data.isAdmin)) {
-        const enriched: UserProfile = {
-          ...data,
-          isPro: true,
-          isAdmin: true,
-          updatedAt: new Date().toISOString()
-        };
-        await setDoc(profileRef, enriched);
-        return enriched;
-      }
-      return data;
-    } else {
-      const baseline: UserProfile = {
-        uid: userId,
-        isPro: isOwner,
-        isAdmin: isOwner,
-        aiActionsThisMonth: 0,
-        boardsThisMonth: 0,
-        updatedAt: new Date().toISOString()
-      };
-      await setDoc(profileRef, baseline);
-      return baseline;
-    }
+    snap = await getDoc(profileRef);
   } catch (error) {
     return handleFirestoreError(error, OperationType.GET, `users/${userId}`);
+  }
+
+  if (snap.exists()) {
+    const data = snap.data() as UserProfile;
+    // If owner but not marked as pro/admin in firestore, auto-upgrade them
+    if (isOwner && (!data.isPro || !data.isAdmin)) {
+      const enriched: UserProfile = {
+        ...data,
+        isPro: true,
+        isAdmin: true,
+        updatedAt: new Date().toISOString()
+      };
+      try {
+        await setDoc(profileRef, enriched);
+      } catch (error) {
+        return handleFirestoreError(error, OperationType.WRITE, `users/${userId}`);
+      }
+      return enriched;
+    }
+    return data;
+  } else {
+    const baseline: UserProfile = {
+      uid: userId,
+      isPro: isOwner,
+      isAdmin: isOwner,
+      aiActionsThisMonth: 0,
+      boardsThisMonth: 0,
+      updatedAt: new Date().toISOString()
+    };
+    try {
+      await setDoc(profileRef, baseline);
+    } catch (error) {
+      return handleFirestoreError(error, OperationType.CREATE, `users/${userId}`);
+    }
+    return baseline;
   }
 }
 

@@ -7,23 +7,40 @@ export interface FootprintPad {
   y: number;
   width: number;
   height: number;
-  shape: "rect" | "circle" | "oval" | "polygon";
+  shape: "rect" | "circle" | "oval" | "polygon" | "roundrect";
   type: "tht" | "smd" | "npth";
+  drill?: number; // For THT/NPTH
+}
+
+export interface GraphicShape {
+  type: "rect" | "circle" | "line" | "polygon";
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+  radius?: number;
+  x2?: number;
+  y2?: number;
+  points?: { x: number; y: number }[];
+  layer: "Silkscreen" | "Courtyard";
+  strokeWidth?: number;
 }
 
 export interface FootprintDefinition {
   id: string;
   name: string;
   pads: FootprintPad[];
+  graphics?: GraphicShape[]; // Silkscreen and courtyard graphics
   mountType: "SMT" | "THT";
-  dimensions: { width: number; height: number };
+  dimensions: { width: number; height: number }; // 2D boundary
+  body3D?: { width: number; height: number; thickness: number; zOffset?: number }; // 3D dimensions
   pinPitch?: number;
   hasThermalPad?: boolean;
 }
 
 export interface LibraryComponent {
   partNumber: string;
-  category: "Resistor" | "Capacitor" | "IC" | "Connector" | "Inductor" | "Diode" | "Transistor" | "Other";
+  category: "Resistor" | "Capacitor" | "IC" | "Connector" | "Inductor" | "Diode" | "Transistor" | "Power" | "MCU" | "RF" | "Other";
   symbolId: string;
   footprints: string[]; // List of compatible footprint IDs
   defaultFootprint: string;
@@ -34,7 +51,35 @@ export interface LibraryComponent {
   pinMapping: Record<string, string>; // Maps logical symbol pin ID to physical pad number, e.g. { "VCC": "8" }
 }
 
-export class ComponentLibrary {
+export function getRecommendedValue(comp: LibraryComponent): string {
+  if (comp.metadata.value) return comp.metadata.value;
+  if (comp.metadata.description && comp.metadata.description.match(/^\d+(k|u|n|p|m|M|G|T)?(Ohm|F|H)?/)) {
+    return comp.metadata.description.split(' ')[0];
+  }
+  switch (comp.category) {
+    case 'Resistor': return '10k';
+    case 'Capacitor': return '100nF';
+    case 'Inductor': return '10uH';
+    case 'Power': 
+      if (comp.metadata.voltageRating) return `${comp.metadata.voltageRating}V`;
+      return comp.partNumber;
+    case 'MCU': return comp.partNumber.split('-')[0];
+    case 'Diode': return comp.partNumber;
+    case 'Transistor': return comp.partNumber;
+    case 'RF': return comp.partNumber;
+    default: return comp.metadata.description || comp.partNumber;
+  }
+}
+
+export function getSilkscreenLabel(comp: LibraryComponent): string {
+  if (comp.category === 'IC' || comp.category === 'MCU' || comp.category === 'RF') return comp.partNumber;
+  if (comp.category === 'Resistor' || comp.category === 'Capacitor' || comp.category === 'Inductor') {
+    return getRecommendedValue(comp);
+  }
+  return comp.partNumber;
+}
+
+class ComponentLibrary {
   private symbols = new Map<string, SymbolDefinition>();
   private footprints = new Map<string, FootprintDefinition>();
   private components = new Map<string, LibraryComponent>();
@@ -56,7 +101,113 @@ export class ComponentLibrary {
   }
 
   getFootprint(id: string): FootprintDefinition | undefined {
-    return this.footprints.get(id);
+    let fp = this.footprints.get(id);
+    if (!fp) {
+      fp = this.synthesizeParametricFootprint(id);
+      if (fp) {
+        this.footprints.set(id, fp);
+      }
+    }
+    return fp;
+  }
+
+  private synthesizeParametricFootprint(id: string): FootprintDefinition | undefined {
+    const soicMatch = id.match(/^FP_SOIC(\d+)(E)?$/);
+    if (soicMatch) {
+      const pins = parseInt(soicMatch[1], 10);
+      const hasEP = !!soicMatch[2];
+      const pitch = 1.27;
+      const bodyWidth = 3.9;
+      const bodyLength = (pins / 2) * pitch; // Approximate
+      const span = 6.0;
+      
+      const pads = dualRow(pins, pitch, span - 0.6, 0.6, 1.55);
+      if (hasEP) {
+        pads.push({ id: "EP", x: 0, y: 0, width: 2.4, height: bodyLength - 1.0, shape: "rect", type: "smd" });
+      }
+      
+      return {
+        id,
+        name: `SOIC-${pins}${hasEP ? '-EP' : ''}`,
+        mountType: "SMT",
+        dimensions: { width: span + 1, height: bodyLength + 1 },
+        body3D: { width: bodyWidth, height: bodyLength, thickness: 1.5, zOffset: 0.1 },
+        pinPitch: pitch,
+        hasThermalPad: hasEP,
+        pads,
+        graphics: [
+          ...generateCourtyard(span + 1.5, bodyLength + 1.0),
+          ...generateSilkscreenOutline(bodyWidth + 0.2, bodyLength + 0.2, true)
+        ]
+      };
+    }
+
+    const qfnMatch = id.match(/^FP_QFN(\d+)(?:_P([\d\.]+))?$/);
+    if (qfnMatch) {
+      const pins = parseInt(qfnMatch[1], 10);
+      const pitch = qfnMatch[2] ? parseFloat(qfnMatch[2]) : 0.5;
+      const perSide = pins / 4;
+      const bodySize = perSide * pitch + 1.5;
+      
+      const pads = quad(perSide, pitch, bodySize / 2 - 0.4, 0.3, 0.8);
+      pads.push({ id: "EP", x: 0, y: 0, width: bodySize - 2.0, height: bodySize - 2.0, shape: "rect", type: "smd" });
+      
+      return {
+        id,
+        name: `QFN-${pins}`,
+        mountType: "SMT",
+        dimensions: { width: bodySize + 1, height: bodySize + 1 },
+        body3D: { width: bodySize, height: bodySize, thickness: 0.85, zOffset: 0.05 },
+        pinPitch: pitch,
+        hasThermalPad: true,
+        pads,
+        graphics: [
+          ...generateCourtyard(bodySize + 1.0, bodySize + 1.0),
+          ...generateSilkscreenOutline(bodySize + 0.2, bodySize + 0.2, true)
+        ]
+      };
+    }
+
+    const hdrMatch = id.match(/^FP_HDR_(\d+)x(\d+)$/);
+    if (hdrMatch) {
+      const rows = parseInt(hdrMatch[1], 10);
+      const cols = parseInt(hdrMatch[2], 10);
+      const pitch = 2.54;
+      const pads: FootprintPad[] = [];
+      const width = cols * pitch;
+      const height = rows * pitch;
+      const startX = -((cols - 1) / 2) * pitch;
+      const startY = -((rows - 1) / 2) * pitch;
+      
+      let num = 1;
+      for (let c = 0; c < cols; c++) {
+        for (let r = 0; r < rows; r++) {
+           pads.push({
+             id: `${num++}`,
+             x: startX + c * pitch,
+             y: startY + r * pitch,
+             width: 1.6, height: 1.6,
+             shape: (c === 0 && r === 0) ? "rect" : "circle",
+             type: "tht", drill: 1.0
+           });
+        }
+      }
+      return {
+        id,
+        name: `Header-${rows}x${cols}`,
+        mountType: "THT",
+        dimensions: { width: width + 0.5, height: height + 0.5 },
+        body3D: { width: width, height: height, thickness: 8.5, zOffset: 2.5 },
+        pinPitch: pitch,
+        pads,
+        graphics: [
+          ...generateCourtyard(width + 1.0, height + 1.0),
+          ...generateSilkscreenOutline(width, height, true)
+        ]
+      };
+    }
+
+    return undefined;
   }
 
   getComponent(partNumber: string): LibraryComponent | undefined {
@@ -65,9 +216,14 @@ export class ComponentLibrary {
 
   searchComponents(query: string, category?: string): LibraryComponent[] {
     const results: LibraryComponent[] = [];
+    const q = query.toLowerCase();
     for (const comp of this.components.values()) {
       if (category && comp.category !== category) continue;
-      if (query && !comp.partNumber.toLowerCase().includes(query.toLowerCase()) && !comp.metadata.description?.toLowerCase().includes(query.toLowerCase())) continue;
+      if (q) {
+        // We know comp.metadata may have standard fields, but not value. We search description
+        const matchStr = `${comp.partNumber} ${comp.metadata.description || ''} ${comp.defaultFootprint}`.toLowerCase();
+        if (!matchStr.includes(q)) continue;
+      }
       results.push(comp);
     }
     return results;
@@ -158,19 +314,39 @@ GlobalLibrary.registerComponent({
   partNumber: "RES-10K-0805",
   category: "Resistor",
   symbolId: "SYM_RESISTOR",
-  footprints: ["FP_0805"],
-  defaultFootprint: "FP_0805",
-  metadata: { description: "10k Ohm 1% 1/8W 0805", tolerance: 1, packageType: "0805" },
+  footprints: ["FP_0805", "FP_0603", "FP_0402"],
+  defaultFootprint: "FP_0603", // AI prefers 0603 as default over 0805
+  metadata: { description: "10k Ohm 1% 1/10W 0603", tolerance: 1, packageType: "0603" },
   pinMapping: { "1": "1", "2": "2" }
 });
 
 GlobalLibrary.registerComponent({
-  partNumber: "CAP-0.1uF-0805",
+  partNumber: "RES-1K-0603",
+  category: "Resistor",
+  symbolId: "SYM_RESISTOR",
+  footprints: ["FP_0603"],
+  defaultFootprint: "FP_0603",
+  metadata: { description: "1k Ohm 1% 1/10W 0603", tolerance: 1, packageType: "0603" },
+  pinMapping: { "1": "1", "2": "2" }
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "CAP-0.1uF-0603",
+  category: "Capacitor",
+  symbolId: "SYM_CAPACITOR",
+  footprints: ["FP_0603"],
+  defaultFootprint: "FP_0603",
+  metadata: { description: "100nF 50V X7R 0603", voltageRating: 50, packageType: "0603" },
+  pinMapping: { "1": "1", "2": "2" }
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "CAP-10uF-0805",
   category: "Capacitor",
   symbolId: "SYM_CAPACITOR",
   footprints: ["FP_0805"],
   defaultFootprint: "FP_0805",
-  metadata: { description: "0.1uF 50V 0805", voltageRating: 50, packageType: "0805" },
+  metadata: { description: "10uF 25V X5R 0805", voltageRating: 25, packageType: "0805" },
   pinMapping: { "1": "1", "2": "2" }
 });
 
@@ -184,6 +360,289 @@ GlobalLibrary.registerComponent({
   pinMapping: { "1": "1", "2": "2", "3": "3", "4": "4", "5": "5", "6": "6", "7": "7", "8": "8" }
 });
 
+// ESP32 WROOM (simulated)
+GlobalLibrary.registerSymbol({
+  id: "SYM_ESP32_WROOM",
+  name: "ESP32-WROOM-32",
+  defaultPrefix: "U",
+  units: [{
+    id: "A",
+    width: 200,
+    height: 300,
+    graphics: [
+      { type: "rect", x: -100, y: -150, width: 200, height: 300, className: "stroke-current fill-[#1a1a1a]" }
+    ],
+    pins: [
+      { id: "1", name: "GND", type: "power_in", x: -120, y: -120, direction: "Right", length: 20 },
+      { id: "2", name: "3V3", type: "power_in", x: -120, y: -100, direction: "Right", length: 20 },
+      { id: "3", name: "EN", type: "input", x: -120, y: -80, direction: "Right", length: 20 },
+      { id: "4", name: "SENSOR_VP", type: "input", x: -120, y: -60, direction: "Right", length: 20 },
+      { id: "5", name: "SENSOR_VN", type: "input", x: -120, y: -40, direction: "Right", length: 20 },
+      { id: "6", name: "IO34", type: "input", x: -120, y: -20, direction: "Right", length: 20 },
+      { id: "7", name: "IO35", type: "input", x: -120, y: 0, direction: "Right", length: 20 },
+      { id: "8", name: "IO32", type: "bidirectional", x: -120, y: 20, direction: "Right", length: 20 },
+      { id: "9", name: "IO33", type: "bidirectional", x: -120, y: 40, direction: "Right", length: 20 },
+      { id: "15", name: "GND", type: "power_in", x: -120, y: 120, direction: "Right", length: 20 },
+      { id: "25", name: "IO0", type: "bidirectional", x: 120, y: 0, direction: "Left", length: 20 },
+      { id: "34", name: "RXD0", type: "input", x: 120, y: -60, direction: "Left", length: 20 },
+      { id: "35", name: "TXD0", type: "output", x: 120, y: -80, direction: "Left", length: 20 },
+      { id: "38", name: "GND", type: "power_in", x: 120, y: -120, direction: "Left", length: 20 }
+    ]
+  }]
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "ESP32-WROOM-32E",
+  category: "RF",
+  symbolId: "SYM_ESP32_WROOM",
+  footprints: ["FP_MODULE_WROOM"],
+  defaultFootprint: "FP_MODULE_WROOM",
+  metadata: { description: "Wi-Fi & Bluetooth MCU Module", packageType: "WROOM" },
+  pinMapping: {} // Will dynamically map 1:1 if omitted
+});
+
+GlobalLibrary.registerSymbol({
+  id: "SYM_USB_C",
+  name: "USB-C Receptacle",
+  defaultPrefix: "J",
+  units: [{
+    id: "A",
+    width: 60,
+    height: 120,
+    graphics: [
+      { type: "rect", x: -30, y: -60, width: 60, height: 120, className: "stroke-current fill-[#1a1a1a]" }
+    ],
+    pins: [
+      { id: "A1", name: "GND", type: "power_in", x: -50, y: -40, direction: "Right", length: 20 },
+      { id: "A4", name: "VBUS", type: "power_in", x: -50, y: -20, direction: "Right", length: 20 },
+      { id: "A5", name: "CC1", type: "bidirectional", x: -50, y: 0, direction: "Right", length: 20 },
+      { id: "A6", name: "Dp1", type: "bidirectional", x: -50, y: 20, direction: "Right", length: 20 },
+      { id: "A7", name: "Dn1", type: "bidirectional", x: -50, y: 40, direction: "Right", length: 20 },
+      { id: "B1", name: "GND", type: "power_in", x: 50, y: -40, direction: "Left", length: 20 },
+      { id: "B4", name: "VBUS", type: "power_in", x: 50, y: -20, direction: "Left", length: 20 },
+      { id: "B5", name: "CC2", type: "bidirectional", x: 50, y: 0, direction: "Left", length: 20 },
+      { id: "B6", name: "Dp2", type: "bidirectional", x: 50, y: 20, direction: "Left", length: 20 },
+      { id: "B7", name: "Dn2", type: "bidirectional", x: 50, y: 40, direction: "Left", length: 20 }
+    ]
+  }]
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "USB-C-16PIN",
+  category: "Connector",
+  symbolId: "SYM_USB_C",
+  footprints: ["FP_USB_C_16"],
+  defaultFootprint: "FP_USB_C_16",
+  metadata: { description: "16-Pin USB Type-C Receptacle SMD", packageType: "SMD" },
+  pinMapping: {} 
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "IND-10uH-1206",
+  category: "Inductor",
+  symbolId: "SYM_INDUCTOR",
+  footprints: ["FP_1206"],
+  defaultFootprint: "FP_1206",
+  metadata: { description: "10uH 1A Ferrite 1206", packageType: "1206" },
+  pinMapping: {}
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "STM32F401RCT6",
+  category: "MCU",
+  symbolId: "SYM_STM32F4",
+  footprints: ["FP_LQFP64"],
+  defaultFootprint: "FP_LQFP64",
+  metadata: { description: "ARM Cortex-M4 32b MCU 64-LQFP", packageType: "LQFP-64" },
+  pinMapping: {}
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "RES-4.7K-0402",
+  category: "Resistor",
+  symbolId: "SYM_RESISTOR",
+  footprints: ["FP_0402"],
+  defaultFootprint: "FP_0402",
+  metadata: { description: "4.7k Ohm 1% 1/16W 0402", tolerance: 1, packageType: "0402" },
+  pinMapping: { "1": "1", "2": "2" }
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "CONN-HDR-2.54-4P",
+  category: "Connector",
+  symbolId: "SYM_HEADER_4",
+  footprints: ["FP_HDR_4x1"],
+  defaultFootprint: "FP_HDR_4x1",
+  metadata: { description: "1x4 2.54mm Pitch Header", packageType: "THT" },
+  pinMapping: {}
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "RP2040",
+  category: "MCU",
+  symbolId: "SYM_RP2040",
+  footprints: ["FP_QFN56_P0.4"], // will be dynamically generated by parametric engine
+  defaultFootprint: "FP_QFN56_P0.4",
+  metadata: { description: "Dual ARM Cortex-M0+ MCU", manufacturer: "Raspberry Pi" },
+  pinMapping: {}
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "AMS1117-3.3",
+  category: "Power",
+  symbolId: "SYM_LDO_3PIN",
+  footprints: ["FP_SOT223"],
+  defaultFootprint: "FP_SOT223",
+  metadata: { description: "3.3V 1A LDO Voltage Regulator", voltageRating: 3.3, currentRating: 1.0 },
+  pinMapping: { "1": "1", "2": "2", "3": "3", "4": "4" }
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "LED-0603-RED",
+  category: "Diode",
+  symbolId: "SYM_LED",
+  footprints: ["FP_0603"],
+  defaultFootprint: "FP_0603",
+  metadata: { description: "Red LED 0603", packageType: "0603" },
+  pinMapping: { "A": "1", "K": "2" }
+});
+
+GlobalLibrary.registerComponent({
+  partNumber: "XTAL-12MHz-SMD",
+  category: "Other",
+  symbolId: "SYM_CRYSTAL",
+  footprints: ["FP_XTAL_4PIN"],
+  defaultFootprint: "FP_XTAL_4PIN",
+  metadata: { description: "12MHz Crystal Oscillator", packageType: "3.2x2.5mm" },
+  pinMapping: {}
+});
+
+// Added Symbols
+GlobalLibrary.registerSymbol({
+  id: "SYM_RP2040",
+  name: "RP2040",
+  defaultPrefix: "U",
+  units: [{
+    id: "A", width: 140, height: 140,
+    graphics: [{ type: "rect", x: -70, y: -70, width: 140, height: 140, className: "stroke-current fill-[#1a1a1a]" }],
+    pins: [
+      { id: "1", name: "VDD", type: "power_in", x: -90, y: -50, direction: "Right", length: 20 },
+      { id: "2", name: "GND", type: "power_in", x: -90, y: 50, direction: "Right", length: 20 },
+      { id: "3", name: "GPIO0", type: "bidirectional", x: 90, y: -50, direction: "Left", length: 20 },
+      { id: "4", name: "GPIO1", type: "bidirectional", x: 90, y: -30, direction: "Left", length: 20 }
+    ]
+  }]
+});
+
+GlobalLibrary.registerSymbol({
+  id: "SYM_LDO_3PIN",
+  name: "LDO Regulator",
+  defaultPrefix: "U",
+  units: [{
+    id: "A", width: 80, height: 80,
+    graphics: [{ type: "rect", x: -40, y: -40, width: 80, height: 80, className: "stroke-current fill-[#1a1a1a]" }],
+    pins: [
+      { id: "1", name: "GND", type: "power_in", x: 0, y: 60, direction: "Up", length: 20 },
+      { id: "2", name: "VOUT", type: "power_out", x: 60, y: 0, direction: "Left", length: 20 },
+      { id: "3", name: "VIN", type: "power_in", x: -60, y: 0, direction: "Right", length: 20 },
+      { id: "4", name: "TAB", type: "power_out", x: 60, y: 20, direction: "Left", length: 20 }
+    ]
+  }]
+});
+
+GlobalLibrary.registerSymbol({
+  id: "SYM_LED",
+  name: "LED",
+  defaultPrefix: "D",
+  units: [{
+    id: "A", width: 40, height: 40,
+    graphics: [
+      { type: "polygon", points: [{x:-10, y:-10}, {x:-10, y:10}, {x:10, y:0}], className: "stroke-current fill-transparent" },
+      { type: "line", x: 10, y: -10, x2: 10, y2: 10, layer: "Silkscreen", className: "stroke-current" }
+    ],
+    pins: [
+      { id: "A", name: "A", type: "passive", x: -30, y: 0, direction: "Right", length: 20 },
+      { id: "K", name: "K", type: "passive", x: 30, y: 0, direction: "Left", length: 20 }
+    ]
+  }]
+});
+
+GlobalLibrary.registerSymbol({
+  id: "SYM_CRYSTAL",
+  name: "Crystal",
+  defaultPrefix: "Y",
+  units: [{
+    id: "A", width: 40, height: 40,
+    graphics: [
+      { type: "rect", x: -5, y: -10, width: 10, height: 20, className: "stroke-current fill-transparent" }
+    ],
+    pins: [
+      { id: "1", name: "1", type: "passive", x: -20, y: 0, direction: "Right", length: 15 },
+      { id: "3", name: "3", type: "passive", x: 20, y: 0, direction: "Left", length: 15 }
+    ]
+  }]
+});
+
+GlobalLibrary.registerSymbol({
+  id: "SYM_INDUCTOR",
+  name: "Inductor",
+  defaultPrefix: "L",
+  units: [{
+    id: "A",
+    width: 60,
+    height: 40,
+    graphics: [
+      { type: "rect", x: -20, y: -10, width: 40, height: 20, className: "stroke-current fill-[#1a1a1a]" }
+    ],
+    pins: [
+      { id: "1", name: "1", type: "passive", x: -40, y: 0, direction: "Right", length: 20 },
+      { id: "2", name: "2", type: "passive", x: 40, y: 0, direction: "Left", length: 20 }
+    ]
+  }]
+});
+
+GlobalLibrary.registerSymbol({
+  id: "SYM_HEADER_4",
+  name: "Header 4-Pin",
+  defaultPrefix: "J",
+  units: [{
+    id: "A",
+    width: 60,
+    height: 100,
+    graphics: [
+      { type: "rect", x: -10, y: -50, width: 20, height: 100, className: "stroke-current fill-[#1a1a1a]" }
+    ],
+    pins: [
+      { id: "1", name: "1", type: "passive", x: -30, y: -30, direction: "Right", length: 20 },
+      { id: "2", name: "2", type: "passive", x: -30, y: -10, direction: "Right", length: 20 },
+      { id: "3", name: "3", type: "passive", x: -30, y: 10, direction: "Right", length: 20 },
+      { id: "4", name: "4", type: "passive", x: -30, y: 30, direction: "Right", length: 20 }
+    ]
+  }]
+});
+
+GlobalLibrary.registerSymbol({
+  id: "SYM_STM32F4",
+  name: "STM32F401",
+  defaultPrefix: "U",
+  units: [{
+    id: "A",
+    width: 160,
+    height: 160,
+    graphics: [
+      { type: "rect", x: -80, y: -80, width: 160, height: 160, className: "stroke-current fill-[#1a1a1a]" }
+    ],
+    pins: [
+      { id: "1", name: "VBAT", type: "power_in", x: -100, y: -60, direction: "Right", length: 20 },
+      { id: "7", name: "NRST", type: "input", x: -100, y: -40, direction: "Right", length: 20 },
+      { id: "16", name: "PA0", type: "bidirectional", x: -100, y: 0, direction: "Right", length: 20 },
+      { id: "17", name: "PA1", type: "bidirectional", x: -100, y: 20, direction: "Right", length: 20 },
+      { id: "32", name: "VDD", type: "power_in", x: 0, y: -100, direction: "Down", length: 20 },
+      { id: "63", name: "VSS", type: "power_in", x: 0, y: 100, direction: "Up", length: 20 }
+    ]
+  }]
+});
+
 // ============================================================================
 // GLOBAL FOOTPRINT LIBRARY
 // A deterministic, industry-standard set of footprints covering common package
@@ -193,6 +652,23 @@ GlobalLibrary.registerComponent({
 // ============================================================================
 
 // --- Pad geometry helpers (dimensions in mm) ---
+
+function generateCourtyard(width: number, height: number): GraphicShape[] {
+  return [
+    { type: "rect", layer: "Courtyard", x: 0, y: 0, width, height, strokeWidth: 0.05 }
+  ];
+}
+
+function generateSilkscreenOutline(width: number, height: number, pin1Mark = false): GraphicShape[] {
+  const shapes: GraphicShape[] = [
+    { type: "rect", layer: "Silkscreen", x: 0, y: 0, width, height, strokeWidth: 0.12 }
+  ];
+  if (pin1Mark) {
+    shapes.push({ type: "circle", layer: "Silkscreen", x: -(width/2) - 0.5, y: -(height/2) - 0.5, radius: 0.25 });
+  }
+  return shapes;
+}
+
 function twoPad(spacing: number, padW: number, padH: number): FootprintPad[] {
   return [
     { id: "1", x: -spacing / 2, y: 0, width: padW, height: padH, shape: "rect", type: "smd" },

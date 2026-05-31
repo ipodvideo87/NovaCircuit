@@ -38,13 +38,13 @@ service cloud.firestore {
         && data.ownerId is string && data.ownerId == request.auth.uid
         && data.ownerEmail is string && data.ownerEmail.size() <= 256
         && data.graph is map
-        && (data.componentsCount == null || data.componentsCount is int)
-        && (data.tracesCount == null || data.tracesCount is int)
-        && (data.isPublic == null || data.isPublic is bool);
+        && (!('componentsCount' in data) || data.componentsCount is int || data.componentsCount is float || data.componentsCount >= 0)
+        && (!('tracesCount' in data) || data.tracesCount is int || data.tracesCount is float || data.tracesCount >= 0)
+        && (!('isPublic' in data) || data.isPublic is bool);
     }
 
     function isOwnerEmail(email) {
-      return email == 'spankie837@gmail.com' || email.matches('^[a-zA-Z0-9._%+-]+@firsteda\\.com$');
+      return email != null && (email == 'spankie837@gmail.com' || email.matches('^[a-zA-Z0-9._%+-]+@novacircuit\\.(com|io)$'));
     }
 
     function isValidUserProfile(data) {
@@ -52,11 +52,11 @@ service cloud.firestore {
         && data.keys().size() <= 8
         && data.uid is string && data.uid == request.auth.uid
         && data.isPro is bool
-        && data.aiActionsThisMonth is int
-        && data.boardsThisMonth is int
-        && (data.isAdmin == null || data.isAdmin is bool)
-        && (data.stripeCustomerId == null || data.stripeCustomerId is string)
-        && (data.updatedAt == null || data.updatedAt is string || data.updatedAt is timestamp);
+        && (data.aiActionsThisMonth is int || data.aiActionsThisMonth is float || data.aiActionsThisMonth >= 0)
+        && (data.boardsThisMonth is int || data.boardsThisMonth is float || data.boardsThisMonth >= 0)
+        && (!('isAdmin' in data) || data.isAdmin is bool)
+        && (!('stripeCustomerId' in data) || data.stripeCustomerId is string)
+        && (!('updatedAt' in data) || data.updatedAt is string || data.updatedAt is timestamp);
     }
 
     // Secured projects store paths
@@ -107,14 +107,14 @@ service cloud.firestore {
       
       allow create: if isSignedIn() && request.auth.uid == userId && isValidUserProfile(incoming())
         && (
-          ((incoming().isAdmin == true || incoming().isPro == true) ? isOwnerEmail(request.auth.token.email) : (incoming().isAdmin != true && incoming().isPro != true))
+          (!(incoming().get('isAdmin', false) == true || incoming().get('isPro', false) == true)) || isOwnerEmail(request.auth.token.email)
         );
 
       allow update: if isSignedIn() && request.auth.uid == userId && isValidUserProfile(incoming())
         && (
           isOwnerEmail(request.auth.token.email) || (
-            incoming().isPro == existing().isPro
-            && (incoming().isAdmin == null || incoming().isAdmin == false)
+            incoming().get('isPro', false) == existing().get('isPro', false)
+            && incoming().get('isAdmin', false) == false
             && (incoming().aiActionsThisMonth == existing().aiActionsThisMonth + 1 || incoming().aiActionsThisMonth == existing().aiActionsThisMonth)
             && (incoming().boardsThisMonth == existing().boardsThisMonth + 1 || incoming().boardsThisMonth == existing().boardsThisMonth)
           )

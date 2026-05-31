@@ -13,13 +13,14 @@ import {
   Settings,
   HelpCircle,
   Cloud,
-  Terminal
+  Terminal,
+  Columns
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 interface WorkspaceHeaderProps {
-  currentView: 'schematic' | 'pcb' | '3d' | 'mfg' | 'observability';
-  onViewChange: (view: 'schematic' | 'pcb' | '3d' | 'mfg' | 'observability') => void;
+  currentView: 'schematic' | 'pcb' | 'split' | '3d' | 'mfg' | 'observability';
+  onViewChange: (view: 'schematic' | 'pcb' | 'split' | '3d' | 'mfg' | 'observability') => void;
   onOpenShare?: () => void;
   onOpenSettings?: () => void;
   onOpenNewProject?: () => void;
@@ -152,6 +153,7 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
         {[
           { id: 'schematic', label: 'Schematic', icon: <CircuitBoard size={12} /> },
           { id: 'pcb', label: 'Board Layout', icon: <Activity size={12} /> },
+          { id: 'split', label: 'Split View', icon: <Columns size={12} /> },
           { id: '3d', label: '3D Preview', icon: <Box size={12} /> },
           { id: 'mfg', label: 'Manufacturing', icon: <Sliders size={12} /> },
           { id: 'observability', label: 'Telemetry HUD', icon: <Terminal size={12} /> },

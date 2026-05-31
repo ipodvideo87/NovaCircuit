@@ -1,92 +1,32 @@
 import { ProjectGraph, NetClass, DifferentialPair } from '../types';
 import { GlobalLibrary, FootprintDefinition } from './componentLibrary';
+import { 
+  BoardLayer, 
+  BoardPad, 
+  BoardComponent, 
+  BoardTrace, 
+  Via, 
+  KeepoutZone, 
+  BoardOutline, 
+  RatnestLine, 
+  BoardNet, 
+  PCBBoard,
+  PolygonPourZone
+} from '../types/pcb';
 
-export type BoardLayer = "F.Cu" | "B.Cu" | "F.Silkscreen" | "B.Silkscreen" | "Edge.Cuts";
-
-export interface BoardPad {
-  id: string; // From footprint
-  x: number; // Absolute X on board
-  y: number; // Absolute Y on board
-  width: number;
-  height: number;
-  layer: BoardLayer;
-  shape: "rect" | "circle" | "oval" | "polygon";
-  type: "smd" | "tht" | "npth";
-  netId?: string; // Which net it belongs to
-}
-
-export interface BoardComponent {
-  id: string; // Matches schematic component ID
-  designator: string;
-  footprintId: string;
-  x: number; // Center X
-  y: number; // Center Y
-  rotation: number; // Degrees
-  layer: BoardLayer; // Usually "F.Cu" or "B.Cu"
-  isLocked: boolean;
-  pads: BoardPad[];
-}
-
-export interface BoardTrace {
-  id: string;
-  netId: string;
-  layer: BoardLayer;
-  width: number;
-  startX: number;
-  startY: number;
-  endX: number;
-  endY: number;
-}
-
-export interface Via {
-  id: string;
-  netId: string;
-  x: number;
-  y: number;
-  drillSize: number;
-  padSize: number;
-}
-
-export interface KeepoutZone {
-  id: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  layers: BoardLayer[];
-  restrictions: ("trace" | "copper" | "via" | "component")[];
-}
-
-export interface BoardOutline {
-  points: {x: number, y: number}[]; // Closed polygon
-}
-
-export interface RatnestLine {
-  id: string;
-  netId: string;
-  startX: number;
-  startY: number;
-  endX: number;
-  endY: number;
-}
-
-export interface BoardNet {
-  id: string;
-  name: string;
-  pads: { componentId: string, padId: string }[];
-}
-
-export interface PCBBoard {
-  components: BoardComponent[];
-  nets: BoardNet[];
-  traces: BoardTrace[];
-  vias: Via[];
-  keepouts: KeepoutZone[];
-  outline: BoardOutline;
-  ratnest: RatnestLine[];
-  netClasses?: NetClass[];
-  diffPairs?: DifferentialPair[];
-}
+export type { 
+  BoardLayer, 
+  BoardPad, 
+  BoardComponent, 
+  BoardTrace, 
+  Via, 
+  KeepoutZone, 
+  BoardOutline, 
+  RatnestLine, 
+  BoardNet, 
+  PCBBoard,
+  PolygonPourZone
+};
 
 const padDerivationCache = new Map<string, { hash: string, pads: BoardPad[] }>();
 
@@ -184,7 +124,8 @@ export function syncBoardFromGraph(graph: ProjectGraph): PCBBoard {
     outline: graph.outline ? graph.outline : { points: [{x:-50,y:-50},{x:50,y:-50},{x:50,y:50},{x:-50,y:50}] },
     ratnest: [],
     netClasses: graph.netClasses ? [...graph.netClasses] : [],
-    diffPairs: graph.diffPairs ? [...graph.diffPairs] : []
+    diffPairs: graph.diffPairs ? [...graph.diffPairs] : [],
+    polygonPours: graph.polygonPours ? [...graph.polygonPours] : []
   };
 
   // Build O(1) lookup map for fast pad-to-net resolution
