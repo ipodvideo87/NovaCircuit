@@ -1,141 +1,105 @@
-export interface BBox {
-  minX: number;
-  minY: number;
-  maxX: number;
-  maxY: number;
-}
-
-export interface SpatialItem<T> {
-  id: string;
-  bbox: BBox;
-  data: T;
-}
-
 export class QuadtreeNode<T> {
-  private items: SpatialItem<T>[] = [];
-  private children: QuadtreeNode<T>[] | null = null;
+  bounds: { minX: number; minY: number; maxX: number; maxY: number };
+  items: { id: T; minX: number; minY: number; maxX: number; maxY: number }[];
+  children: QuadtreeNode<T>[] | null;
+  maxItems = 10;
+  maxDepth = 5;
+  depth: number;
 
-  constructor(
-    public boundary: BBox,
-    private capacity: number = 16,
-    private maxDepth: number = 8,
-    private depth: number = 0
-  ) {}
+  constructor(bounds: { minX: number; minY: number; maxX: number; maxY: number }, depth = 0) {
+    this.bounds = bounds;
+    this.items = [];
+    this.children = null;
+    this.depth = depth;
+  }
 
-  public insert(item: SpatialItem<T>): boolean {
-    if (!this.intersects(this.boundary, item.bbox)) {
-      return false;
-    }
-
+  insert(item: { id: T; minX: number; minY: number; maxX: number; maxY: number }) {
     if (this.children) {
       for (const child of this.children) {
-        if (child.insert(item)) {
-          return true;
+        if (
+          item.minX < child.bounds.maxX &&
+          item.maxX > child.bounds.minX &&
+          item.minY < child.bounds.maxY &&
+          item.maxY > child.bounds.minY
+        ) {
+          child.insert(item);
         }
       }
+      return;
     }
 
     this.items.push(item);
-
-    if (this.items.length > this.capacity && this.depth < this.maxDepth) {
-      if (!this.children) {
-        this.subdivide();
-      }
-
-      const remainingItems: SpatialItem<T>[] = [];
-      for (const currentItem of this.items) {
-        let placed = false;
-        for (const child of this.children!) {
-          if (child.insert(currentItem)) {
-            placed = true;
-            break;
-          }
-        }
-        if (!placed) {
-          remainingItems.push(currentItem);
-        }
-      }
-      this.items = remainingItems;
+    if (this.items.length > this.maxItems && this.depth < this.maxDepth) {
+      this.split();
     }
-
-    return true;
   }
 
-  public query(range: BBox, results: SpatialItem<T>[] = []): SpatialItem<T>[] {
-    if (!this.intersects(this.boundary, range)) {
-      return results;
-    }
+  split() {
+    const midX = (this.bounds.minX + this.bounds.maxX) / 2;
+    const midY = (this.bounds.minY + this.bounds.maxY) / 2;
+    this.children = [
+      new QuadtreeNode({ minX: this.bounds.minX, minY: this.bounds.minY, maxX: midX, maxY: midY }, this.depth + 1),
+      new QuadtreeNode({ minX: midX, minY: this.bounds.minY, maxX: this.bounds.maxX, maxY: midY }, this.depth + 1),
+      new QuadtreeNode({ minX: this.bounds.minX, minY: midY, maxX: midX, maxY: this.bounds.maxY }, this.depth + 1),
+      new QuadtreeNode({ minX: midX, minY: midY, maxX: this.bounds.maxX, maxY: this.bounds.maxY }, this.depth + 1),
+    ];
 
     for (const item of this.items) {
-      if (this.intersects(item.bbox, range)) {
-        results.push(item);
+      for (const child of this.children) {
+        if (
+          item.minX < child.bounds.maxX &&
+          item.maxX > child.bounds.minX &&
+          item.minY < child.bounds.maxY &&
+          item.maxY > child.bounds.minY
+        ) {
+          child.insert(item);
+        }
       }
     }
+    this.items = [];
+  }
 
+  query(bounds: { minX: number; minY: number; maxX: number; maxY: number }, result: Set<T>) {
     if (this.children) {
       for (const child of this.children) {
-        child.query(range, results);
+        if (
+          bounds.minX < child.bounds.maxX &&
+          bounds.maxX > child.bounds.minX &&
+          bounds.minY < child.bounds.maxY &&
+          bounds.maxY > child.bounds.minY
+        ) {
+          child.query(bounds, result);
+        }
+      }
+    } else {
+      for (const item of this.items) {
+        if (
+          bounds.minX < item.maxX &&
+          bounds.maxX > item.minX &&
+          bounds.minY < item.maxY &&
+          bounds.maxY > item.minY
+        ) {
+          result.add(item.id);
+        }
       }
     }
-
-    return results;
-  }
-
-  private subdivide() {
-    const minX = this.boundary.minX;
-    const minY = this.boundary.minY;
-    const maxX = this.boundary.maxX;
-    const maxY = this.boundary.maxY;
-    const midX = minX + (maxX - minX) / 2;
-    const midY = minY + (maxY - minY) / 2;
-
-    this.children = [
-      new QuadtreeNode<T>({ minX, minY, maxX: midX, maxY: midY }, this.capacity, this.maxDepth, this.depth + 1), // NW
-      new QuadtreeNode<T>({ minX: midX, minY, maxX, maxY: midY }, this.capacity, this.maxDepth, this.depth + 1), // NE
-      new QuadtreeNode<T>({ minX, minY: midY, maxX: midX, maxY }, this.capacity, this.maxDepth, this.depth + 1), // SW
-      new QuadtreeNode<T>({ minX: midX, minY: midY, maxX, maxY }, this.capacity, this.maxDepth, this.depth + 1)  // SE
-    ];
-  }
-
-  private intersects(a: BBox, b: BBox): boolean {
-    return !(
-      b.minX > a.maxX ||
-      b.maxX < a.minX ||
-      b.minY > a.maxY ||
-      b.maxY < a.minY
-    );
   }
 }
 
 export class SpatialIndex<T> {
-  private root: QuadtreeNode<T>;
+  root: QuadtreeNode<T>;
 
-  constructor(private globalBoundary: BBox = { minX: -10000, minY: -10000, maxX: 10000, maxY: 10000 }) {
-    this.root = new QuadtreeNode<T>(this.globalBoundary);
+  constructor(bounds = { minX: -10000, minY: -10000, maxX: 10000, maxY: 10000 }) {
+    this.root = new QuadtreeNode<T>(bounds);
   }
 
-  public clear() {
-    this.root = new QuadtreeNode<T>(this.globalBoundary);
+  insert(id: T, minX: number, minY: number, maxX: number, maxY: number) {
+    this.root.insert({ id, minX, minY, maxX, maxY });
   }
 
-  public insert(id: string, minX: number, minY: number, maxX: number, maxY: number, data: T) {
-    const bbox: BBox = { minX, minY, maxX, maxY };
-    this.root.insert({ id, bbox, data });
-  }
-
-  public query(minX: number, minY: number, maxX: number, maxY: number): T[] {
-    const range: BBox = { minX, minY, maxX, maxY };
-    const results: SpatialItem<T>[] = [];
-    this.root.query(range, results);
-    // Return uniquely matched data items
-    const seen = new Set<string>();
-    const uniques: T[] = [];
-    for (const res of results) {
-      if (!seen.has(res.id)) {
-        seen.add(res.id);
-        uniques.push(res.data);
-      }
-    }
-    return uniques;
+  queryWindow(minX: number, minY: number, maxX: number, maxY: number): Set<T> {
+    const result = new Set<T>();
+    this.root.query({ minX, minY, maxX, maxY }, result);
+    return result;
   }
 }

@@ -1,84 +1,20 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-@import "tailwindcss";
-
-@theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-  
-  --color-board-bg: #050505;
-  --color-board-grid: #1a1a1a;
-  --color-sidebar: #0d0d0d;
-  --color-border: rgba(255, 255, 255, 0.1);
-  --color-accent: #6366f1;
-  --color-accent-secondary: #a855f7;
-}
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 @layer base {
   body {
-    @apply bg-[#0a0a0a] text-gray-200 antialiased font-sans select-none;
-    overflow: hidden;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
   }
 }
 
-/* Custom scrollbar for technical look */
-::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-/* React Flow customizations */
-.react-flow__pane {
-  background-color: var(--color-board-bg);
-}
-
-.react-flow__handle {
-  width: 6px !important;
-  height: 6px !important;
-  background: #6366f1 !important;
-  border: 1px solid rgba(255, 255, 255, 0.5) !important;
-  position: relative;
-}
-
-/* Optimized Mobile Touch Target Extensions for Connection Handles */
-@media (max-width: 768px) {
-  .react-flow__handle {
-    width: 8px !important;
-    height: 8px !important;
-    background: #818cf8 !important;
+/* Custom utilities for smooth scroll interactions */
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
   }
-  .react-flow__handle::after {
-    content: "";
-    position: absolute;
-    top: -16px;
-    left: -16px;
-    right: -16px;
-    bottom: -16px;
-    border-radius: 50%;
-    background: transparent;
-    pointer-events: auto;
-    z-index: 100;
+  .no-scrollbar {
+    -ms-overflow-style: none;  /* IE and Edge */
+    scrollbar-width: none;  /* Firefox */
   }
-}
-
-.react-flow__edge-path {
-  stroke: rgba(255, 255, 255, 0.2);
-  stroke-width: 1.5;
-}
-
-.react-flow__node {
-  border-radius: 8px;
-  font-size: 11px;
 }
