@@ -26,19 +26,35 @@ export const TEMPLATES: Record<string, ProjectTemplate> = {
         // USB VBUS to AMS1117 Input
         { id: "trace-pwr-1", startX: 150, startY: 220, endX: 210, endY: 180, width: 0.6, netId: "vcc-5v" },
         { id: "trace-pwr-2", startX: 210, startY: 180, endX: 250, endY: 220, width: 0.6, netId: "vcc-5v" },
+        
         // AMS1117 Output to Decoupling C2
         { id: "trace-pwr-3", startX: 250, startY: 220, endX: 290, endY: 180, width: 0.6, netId: "vcc-3.3v" },
         { id: "trace-pwr-4", startX: 290, startY: 180, endX: 400, endY: 300, width: 0.5, netId: "vcc-3.3v" },
+        
+        // Pullups & Straps
+        { id: "trace-vcc-r1", startX: 350, startY: 240, endX: 290, endY: 180, width: 0.3, netId: "vcc-3.3v" },
+        { id: "trace-en-r1", startX: 350, startY: 240, endX: 400, endY: 300, width: 0.25, netId: "en" },
+        { id: "trace-boot-r2", startX: 350, startY: 260, endX: 400, endY: 300, width: 0.25, netId: "boot" },
+        
+        // High frequency clock
+        { id: "trace-xtal-path", startX: 480, startY: 380, endX: 400, endY: 300, width: 0.2, netId: "xtal-clk" },
+        
         // USB D+/D- lines with 90 ohm differential mapping
         { id: "trace-diff-p", startX: 150, startY: 215, endX: 400, endY: 295, width: 0.18, netId: "usb-dp" },
         { id: "trace-diff-n", startX: 150, startY: 225, endX: 400, endY: 305, width: 0.18, netId: "usb-dn" },
+        
         // RF trace from MCU base to Antenna (Impedance controlled 50 ohm microstrip)
         { id: "trace-rf-path", startX: 400, startY: 300, endX: 500, endY: 180, width: 0.32, netId: "wifi-ant-rf" }
       ],
       ratnest: [
-        { id: "rat-gnd-1", startX: 150, startY: 210, endX: 250, endY: 210, netId: "gnd" },
-        { id: "rat-gnd-2", startX: 250, startY: 210, endX: 400, endY: 320, netId: "gnd" },
-        { id: "rat-en", startX: 350, startY: 240, endX: 400, endY: 290, netId: "en" }
+        // Ground plane multi-layer airwires
+        { id: "rat-gnd-1", startX: 150, startY: 220, endX: 210, endY: 180, netId: "gnd" },
+        { id: "rat-gnd-2", startX: 210, startY: 180, endX: 250, endY: 220, netId: "gnd" },
+        { id: "rat-gnd-3", startX: 250, startY: 220, endX: 290, endY: 180, netId: "gnd" },
+        { id: "rat-gnd-4", startX: 290, startY: 180, endX: 350, endY: 260, netId: "gnd" },
+        { id: "rat-gnd-5", startX: 350, startY: 260, endX: 400, endY: 300, netId: "gnd" },
+        { id: "rat-gnd-6", startX: 480, startY: 380, endX: 400, endY: 300, netId: "gnd" },
+        { id: "rat-gnd-7", startX: 500, startY: 180, endX: 400, endY: 300, netId: "gnd" }
       ]
     }
   },

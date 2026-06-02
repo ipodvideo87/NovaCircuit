@@ -21,31 +21,169 @@ import {
   Workflow,
   Split,
   X,
-  RefreshCw
+  RefreshCw,
+  Check,
+  AlertCircle
 } from 'lucide-react';
+import JSZip from 'jszip';
 import { useTransactionStore } from '../lib/core/transaction';
+import { generateManufacturingPackage } from '../lib/exporter';
+import { OnboardingDialog } from './OnboardingDialog';
+import { autoRouteBoardNets } from '../lib/core/netlist';
 
 export const PCBEditor: React.FC = () => {
-  const { undo, redo, loadBoard, history, currentIndex } = useTransactionStore();
+  const { undo, redo, loadBoard, history, currentIndex, experienceLevel, setExperienceLevel } = useTransactionStore();
   const [viewMode, setViewMode] = useState<'pcb' | 'sch' | 'split'>('pcb');
   const [showSearchHelp, setShowSearchHelp] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   const [mfgExporting, setMfgExporting] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // AI Copilot State
   const [isCopilotOpen, setIsCopilotOpen] = useState(false);
-  const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant', text: string }>>([
-    { role: 'assistant', text: "Hello! I am NovaCircuit AI, your electrical engineering and layout CAD co-designer. How can I help you optimize high-frequency signals today?" }
+  const [messages, setMessages] = useState<Array<{ 
+    role: 'user' | 'assistant'; 
+    text: string;
+    isPlanProposal?: boolean;
+    planSteps?: Array<{ id: string; title: string; desc: string; actions: Array<{ type: 'SET_WIDTH' | 'LENGTH_MATCH' | 'ADD_GUARD'; targetNetKeywords: string[]; width?: number; clearance?: number }> }>;
+    clarifyingQuestion?: string;
+    proposalActivated?: boolean;
+    isInitialGreeting?: boolean;
+  }>>([
+    { 
+      role: 'assistant', 
+      text: "Hello! I am NovaCircuit AI, your electrical engineering and layout CAD co-designer. How can I help you optimize high-frequency signals today?",
+      isInitialGreeting: true
+    }
   ]);
   const [chatInput, setChatInput] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
+  // Interactive Planning State
+  const [pendingPlan, setPendingPlan] = useState<{
+    explanation: string;
+    steps: Array<{
+      id: string;
+      title: string;
+      desc: string;
+      actions: Array<{ type: 'SET_WIDTH' | 'LENGTH_MATCH' | 'ADD_GUARD'; targetNetKeywords: string[]; width?: number; clearance?: number }>;
+      status: 'pending' | 'approved' | 'rejected';
+    }>;
+    clarifyingQuestion?: string;
+  } | null>(null);
+
+  const handleToggleStepApproval = (stepId: string) => {
+    if (!pendingPlan) return;
+    setPendingPlan(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        steps: prev.steps.map(step => {
+          if (step.id === stepId) {
+            const nextStatus = step.status === 'approved' ? 'pending' : 'approved';
+            return { ...step, status: nextStatus };
+          }
+          return step;
+        })
+      };
+    });
+  };
+
+  const handleExecutePlan = () => {
+    if (!pendingPlan) return;
+    
+    const approvedActions = pendingPlan.steps
+      .filter(step => step.status === 'approved')
+      .flatMap(step => step.actions);
+
+    if (approvedActions.length === 0) {
+      setToast({
+        message: "No layout features are checked. Mark at least one plan item to execute.",
+        type: "error"
+      });
+      return;
+    }
+
+    applyCopilotActions(approvedActions);
+    
+    setMessages(prev => [
+      ...prev,
+      { 
+        role: 'assistant', 
+        text: `Successfully executed ${pendingPlan.steps.filter(s => s.status === 'approved').length} steps of the design layout roadmap! Applied trace adjustments to matching nets.` 
+      }
+    ]);
+
+    setToast({
+      message: "Orchestration complete! Plan features successfully executed on active PCB design.",
+      type: "success"
+    });
+
+    setPendingPlan(null);
+  };
+
+  const handleRejectPlan = () => {
+    setPendingPlan(null);
+    setMessages(prev => [
+      ...prev,
+      { role: 'assistant', text: "Design plan declined. I won me to change layout elements. Feel free to describe a new direction or tweak net parameters offline." }
+    ]);
+  };
+
   // Auto scroll chat to bottom when message arrives
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isChatLoading]);
+  }, [messages, isChatLoading, pendingPlan]);
+
+  // Clean up toast notification automatically
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => {
+        setToast(null);
+      }, 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
+
+  const handleLoadTemplateFromChat = (key: string) => {
+    if (TEMPLATES[key]) {
+      loadBoard(autoRouteBoardNets(TEMPLATES[key].board));
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', text: `Successfully loaded the **${TEMPLATES[key].name}** design template directly in your workspace! Let's optimize this high-frequency layout together.` }
+      ]);
+      setToast({
+        message: `Loaded template: ${TEMPLATES[key].name}`,
+        type: 'success'
+      });
+    }
+  };
+
+  const handleActivateProposal = (msgIndex: number) => {
+    const msg = messages[msgIndex];
+    if (!msg || !msg.planSteps) return;
+    
+    // Mark as activated
+    setMessages(prev => prev.map((m, i) => i === msgIndex ? { ...m, proposalActivated: true } : m));
+    
+    const initialSteps = msg.planSteps.map(step => ({
+      ...step,
+      status: 'pending' as const
+    }));
+    
+    setPendingPlan({
+      explanation: msg.text,
+      steps: initialSteps,
+      clarifyingQuestion: msg.clarifyingQuestion
+    });
+
+    setToast({
+      message: "Layout roadmap activated! Check design steps to execute.",
+      type: "info"
+    });
+  };
 
   const handleSendPrompt = async (promptText: string) => {
     if (!promptText.trim()) return;
@@ -64,7 +202,8 @@ export const PCBEditor: React.FC = () => {
         },
         body: JSON.stringify({
           prompt: promptText,
-          traces: currentBoard.traces
+          traces: currentBoard.traces,
+          experienceLevel: experienceLevel || 'intermediate'
         })
       });
 
@@ -73,16 +212,39 @@ export const PCBEditor: React.FC = () => {
       }
 
       const data = (await response.json()) as { 
+        isPlan?: boolean;
         explanation: string; 
+        clarifyingQuestion?: string;
+        planSteps?: Array<{ id: string; title: string; desc: string; actions: Array<{ type: 'SET_WIDTH' | 'LENGTH_MATCH' | 'ADD_GUARD'; targetNetKeywords: string[]; width?: number; clearance?: number }> }>;
         actions?: Array<{ type: 'SET_WIDTH' | 'LENGTH_MATCH' | 'ADD_GUARD'; targetNetKeywords: string[]; width?: number; clearance?: number }>; 
       };
       
-      // Update with AI explanation
-      setMessages(prev => [...prev, { role: 'assistant', text: data.explanation || "No clarification details returned." }]);
-      
-      // Apply actions if returned
-      if (data.actions && data.actions.length > 0) {
-        applyCopilotActions(data.actions);
+      // Check if response contains a multi-step design roadmap proposal
+      if (data.isPlan && data.planSteps && data.planSteps.length > 0) {
+        // Add assistant response with the detailed plan embedded
+        let assistantText = data.explanation;
+        if (data.clarifyingQuestion) {
+          assistantText += `\n\n**Question to resolve:**\n${data.clarifyingQuestion}`;
+        }
+        setMessages(prev => [
+          ...prev, 
+          { 
+            role: 'assistant', 
+            text: assistantText,
+            isPlanProposal: true,
+            planSteps: data.planSteps,
+            clarifyingQuestion: data.clarifyingQuestion,
+            proposalActivated: false
+          }
+        ]);
+      } else {
+        // Update with AI explanation
+        setMessages(prev => [...prev, { role: 'assistant', text: data.explanation || "No clarification details returned." }]);
+        
+        // Apply actions if returned
+        if (data.actions && data.actions.length > 0) {
+          applyCopilotActions(data.actions);
+        }
       }
     } catch (error: unknown) {
       const err = error as Error;
@@ -231,35 +393,77 @@ export const PCBEditor: React.FC = () => {
     reader.readAsText(file);
   };
 
-  // Simulated manufacturing package build
-  const triggerMfgPackageDownload = () => {
+  // Real manufacturing package build using JSZip with verification 
+  const triggerMfgPackageDownload = async () => {
     setMfgExporting(true);
-    setTimeout(() => {
-      setMfgExporting(false);
-      
-      const zipData = JSON.stringify({
-        gerbers: {
-          GTL: "Top Copper Gerber data",
-          GBL: "Bottom Copper Gerber data",
-          GTO: "Top Silkscreen data",
-          GBO: "Bottom Silkscreen data",
-          GTS: "Top Solder mask data",
-          GBS: "Bottom Solder mask data",
-          TXT: "NC Drill Coordinates"
-        },
-        ipc_netlist: "IPC-D-356 Formatted netlist"
-      }, null, 2);
+    try {
+      const activeBoard = history[currentIndex];
+      if (!activeBoard) {
+        throw new Error("No active board state found in workspace history!");
+      }
 
-      const blob = new Blob([zipData], { type: 'application/zip' });
-      const url = URL.createObjectURL(blob);
+      console.info("Assembling and exporting CAD design assets...");
+      const zipBlob = await generateManufacturingPackage(activeBoard);
+
+      // Verify the generated zip contains mandatory folders/files before downloading
+      console.info("Conducting client-side validation audit on generated manufacturing ZIP archive...");
+      const loadedZip = await JSZip.loadAsync(zipBlob);
+      const filesList = Object.keys(loadedZip.files);
+
+      // Verification predicates
+      const hasGerberFolder = filesList.some(name => name.startsWith("Gerbers/"));
+      const hasDrillFolder = filesList.some(name => name.startsWith("Drill/"));
+      const hasAssemblyFolder = filesList.some(name => name.startsWith("Assembly/"));
+      
+      const hasGtl = filesList.some(name => name.endsWith(".gtl"));
+      const hasGbl = filesList.some(name => name.endsWith(".gbl"));
+      const hasDrl = filesList.some(name => name.endsWith(".drl"));
+      const hasBom = filesList.some(name => name.includes("BOM_") || name.endsWith(".csv"));
+
+      const validationErrors: string[] = [];
+      if (!hasGerberFolder || (!hasGtl && !hasGbl)) {
+        validationErrors.push("Gerber Layer Tracks (GTL/GBL) folder or data is missing");
+      }
+      if (!hasDrillFolder || !hasDrl) {
+        validationErrors.push("NC Drill Excellon file (.drl) is missing or incomplete");
+      }
+      if (!hasAssemblyFolder || !hasBom) {
+        validationErrors.push("Bill of Materials (BOM) export compilation file is missing");
+      }
+
+      if (validationErrors.length > 0) {
+        throw new Error(`Integrity Check Failed: Compiled package is missing critical EDA outputs.\n- ${validationErrors.join("\n- ")}`);
+      }
+
+      console.info("Verification succeeded! ZIP package is complete and undamaged.");
+
+      const filename = `NovaCircuit_Gerber_MFG_Package_${Date.now()}.zip`;
+      if (!filename.endsWith('.zip')) {
+        throw new Error("Assertion failed: Output package is missing .zip suffix validation!");
+      }
+
+      const url = URL.createObjectURL(zipBlob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `Gerber_MFG_Package_${Date.now()}.zip`;
+      link.download = filename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-    }, 1500);
+
+      setToast({
+        message: "Manufacturing export successfully compiled and verified! Gerber RS-274X tracks, Excellon Drill drills, and Assembly spreadsheets packages are verified and downloaded.",
+        type: "success"
+      });
+    } catch (err) {
+      console.error("Manufacturing ZIP generation error:", err);
+      setToast({
+        message: `Export failure: ${err instanceof Error ? err.message : 'Visual workspace compilation crashed'}`,
+        type: "error"
+      });
+    } finally {
+      setMfgExporting(false);
+    }
   };
 
   return (
@@ -413,7 +617,7 @@ export const PCBEditor: React.FC = () => {
                 onChange={(e) => {
                   const val = e.target.value;
                   if (val && TEMPLATES[val]) {
-                    loadBoard(TEMPLATES[val].board);
+                    loadBoard(autoRouteBoardNets(TEMPLATES[val].board));
                   }
                 }}
                 className="bg-[#111116] border border-white/5 hover:border-indigo-500/20 text-white text-[10px] font-bold uppercase py-1 px-2 rounded-lg focus:outline-none transition-colors cursor-pointer max-w-[100px] xs:max-w-[120px] sm:max-w-[180px] shrink-0"
@@ -426,6 +630,33 @@ export const PCBEditor: React.FC = () => {
                     {item.name}
                   </option>
                 ))}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0 border-l border-white/10 pl-1.5 md:pl-3">
+              <span className="hidden md:inline text-[9px] font-bold text-gray-500 uppercase tracking-widest">Skill:</span>
+              <select
+                value={experienceLevel || ""}
+                onChange={(e) => {
+                  setExperienceLevel(e.target.value as 'beginner' | 'intermediate' | 'advanced');
+                  setToast({
+                    message: `Layout Copilot adapts to ${e.target.value.toUpperCase()} capability profile. Instructions, technical equations, planning filters have been adjusted.`,
+                    type: "info"
+                  });
+                }}
+                className={`bg-[#111116] border text-[10px] font-bold uppercase py-1 px-2 rounded-lg focus:outline-none transition-colors cursor-pointer max-w-[120px] shrink-0 ${
+                  experienceLevel === 'beginner' 
+                    ? 'border-emerald-500/30 text-emerald-400' 
+                    : experienceLevel === 'advanced' 
+                      ? 'border-rose-500/30 text-rose-450 text-rose-450 text-rose-400' 
+                      : 'border-indigo-500/30 text-indigo-400'
+                }`}
+                title="Select EDA capability tier"
+              >
+                <option value="" disabled>-- Skill tier --</option>
+                <option value="beginner">Beginner</option>
+                <option value="intermediate">Intermediate</option>
+                <option value="advanced">Advanced</option>
               </select>
             </div>
 
@@ -510,7 +741,7 @@ export const PCBEditor: React.FC = () => {
                 {messages.map((m, idx) => (
                   <div key={idx} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
                     <span className="text-[8px] font-mono text-gray-500 uppercase mb-1 tracking-widest">
-                      {m.role === 'user' ? 'Layout Designer' : 'NovaCircuit AI AI'}
+                       {m.role === 'user' ? 'Layout Designer' : 'NovaCircuit AI AI'}
                     </span>
                     <div className={`p-3 rounded-xl text-[11px] leading-relaxed max-w-[90%] font-sans whitespace-pre-wrap ${
                       m.role === 'user' 
@@ -518,6 +749,51 @@ export const PCBEditor: React.FC = () => {
                         : 'bg-[#12121a] text-gray-200 rounded-bl-none border border-white/5'
                     }`}>
                       {m.text}
+
+                      {m.isInitialGreeting && (
+                        <div className="mt-3 pt-3 border-t border-white/5 space-y-2">
+                          <span className="text-[9px] font-black uppercase text-indigo-400 tracking-wider">Quickstart Project Seeds:</span>
+                          <div className="flex flex-col gap-1.5 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => handleLoadTemplateFromChat('esp32')}
+                              className="text-left w-full px-2.5 py-1.5 bg-[#171724]/60 hover:bg-indigo-600 hover:text-white border border-white/5 rounded-lg text-[9.5px] font-bold tracking-tight uppercase transition-all flex items-center justify-between"
+                            >
+                              <span>📱 ESP32 IoT Dev Board</span>
+                              <span className="text-[8px] font-mono opacity-50">Wi-Fi / LDO</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleLoadTemplateFromChat('powerDelivery')}
+                              className="text-left w-full px-2.5 py-1.5 bg-[#171724]/60 hover:bg-indigo-660 hover:text-white border border-white/5 rounded-lg text-[9.5px] font-bold tracking-tight uppercase transition-all flex items-center justify-between"
+                            >
+                              <span>⚡ 65W Buck-Boost PD</span>
+                              <span className="text-[8px] font-mono opacity-50">Converter / MOSFET</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleLoadTemplateFromChat('stm32')}
+                              className="text-left w-full px-2.5 py-1.5 bg-[#171724]/60 hover:bg-[#4b6bfb] hover:text-white border border-white/5 rounded-lg text-[9.5px] font-bold tracking-tight uppercase transition-all flex items-center justify-between"
+                            >
+                              <span>🔬 STM32 precision ADC</span>
+                              <span className="text-[8px] font-mono opacity-50">Analog / Op-Amp</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {m.isPlanProposal && !m.proposalActivated && (
+                        <div className="mt-3 pt-3 border-t border-indigo-500/10 flex flex-col gap-2">
+                          <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-widest">Plan Ready based on {experienceLevel?.toUpperCase() || 'INTERMEDIATE'} Profile:</span>
+                          <button
+                            type="button"
+                            onClick={() => handleActivateProposal(idx)}
+                            className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-black text-[10px] uppercase tracking-widest rounded-lg flex items-center justify-center gap-1 shadow-lg shadow-indigo-600/20 active:scale-[0.98] transition-all"
+                          >
+                            <Sparkles size={11} className="animate-pulse" /> Create Detailed Plan
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -530,6 +806,63 @@ export const PCBEditor: React.FC = () => {
                     </div>
                   </div>
                 )}
+
+                {pendingPlan && (
+                  <div className="bg-[#11111d] border-2 border-indigo-500/30 rounded-xl p-4 space-y-3 shadow-2xl animate-in fade-in slide-in-from-bottom-2 duration-300">
+                    <div className="flex items-center gap-2 text-indigo-400 font-black uppercase text-[10px] tracking-widest">
+                      <Workflow size={15} />
+                      Layout Roadmap Proposal
+                    </div>
+                    
+                    <p className="text-[10px] text-gray-400 leading-relaxed font-sans">
+                      Verify and select the layout modules you want to execute on your virtual copper stack:
+                    </p>
+
+                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                      {pendingPlan.steps.map((step) => (
+                        <div 
+                          key={step.id} 
+                          onClick={() => handleToggleStepApproval(step.id)}
+                          className={`p-3 rounded-xl border text-left cursor-pointer transition-all ${
+                            step.status === 'approved' 
+                              ? 'bg-indigo-600/15 border-indigo-500 text-white' 
+                              : 'bg-[#151522] border-white/5 hover:border-white/10 text-gray-300'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <div className={`w-3.5 h-3.5 rounded flex items-center justify-center border ${
+                              step.status === 'approved' 
+                                ? 'bg-indigo-500 border-indigo-400 text-white' 
+                                : 'border-gray-600 bg-black/25'
+                            }`}>
+                              {step.status === 'approved' && <Check size={10} strokeWidth={3} />}
+                            </div>
+                            <span className="text-[10px] font-bold tracking-tight uppercase">{step.title}</span>
+                          </div>
+                          <p className="text-[10px] text-gray-400 mt-1 leading-normal ml-5">
+                            {step.desc}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        onClick={handleExecutePlan}
+                        className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white whitespace-nowrap text-[10px] font-black uppercase rounded-lg tracking-wider transition-colors shadow-lg select-none"
+                      >
+                        Execute Selected
+                      </button>
+                      <button
+                        onClick={handleRejectPlan}
+                        className="px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/5 text-gray-400 hover:text-white text-[10px] font-black uppercase rounded-lg tracking-wider transition-colors select-none"
+                      >
+                        Decline
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <div ref={chatBottomRef} />
               </div>
 
@@ -636,13 +969,46 @@ export const PCBEditor: React.FC = () => {
         </div>
       </div>
 
-      {/* 3. Popups/Search documentation center */}
-      {showSearchHelp && (
-        <HelpDialog onClose={() => setShowSearchHelp(false)} />
-      )}
-      {showAbout && (
-        <AboutDialog onClose={() => setShowAbout(false)} />
-      )}
-    </div>
-  );
+       {/* 3. Popups/Search documentation center */}
+       {showSearchHelp && (
+         <HelpDialog onClose={() => setShowSearchHelp(false)} />
+       )}
+       {showAbout && (
+         <AboutDialog onClose={() => setShowAbout(false)} />
+       )}
+       {experienceLevel === null && (
+         <OnboardingDialog onSelect={(level) => {
+           setExperienceLevel(level);
+           setIsCopilotOpen(true);
+         }} />
+       )}
+
+       {/* 4. Elegant Toast Notification banner */}
+       {toast && (
+         <div className="fixed bottom-6 right-6 left-6 sm:left-auto sm:w-[420px] bg-[#0c0c12]/95 border border-white/10 p-4 rounded-xl flex items-start gap-3 shadow-2xl backdrop-blur-xl z-[9999] transition-all duration-300">
+           <div className={`p-1.5 rounded-lg shrink-0 ${
+             toast.type === 'success' 
+               ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' 
+               : 'bg-rose-500/10 border border-rose-500/20 text-rose-400'
+           }`}>
+             {toast.type === 'success' ? <Check size={16} /> : <AlertCircle size={16} />}
+           </div>
+           <div className="flex-1 min-w-0">
+             <h4 className="text-[10px] font-black uppercase text-gray-200 tracking-wider">
+               {toast.type === 'success' ? 'EDA System Status: Validated' : 'EDA System Warning'}
+             </h4>
+             <p className="text-[10px] text-gray-400 mt-1 leading-relaxed">
+               {toast.message}
+             </p>
+           </div>
+           <button 
+             onClick={() => setToast(null)}
+             className="p-1 hover:bg-white/5 rounded text-gray-500 hover:text-white transition-colors focus:outline-none shrink-0"
+           >
+             <X size={14} />
+           </button>
+         </div>
+       )}
+     </div>
+   );
 };

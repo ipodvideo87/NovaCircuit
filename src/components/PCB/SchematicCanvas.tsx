@@ -1,59 +1,8 @@
 import React, { useRef, useMemo, useState, useEffect } from 'react';
 import { useTransactionStore } from '../../lib/core/transaction';
 import { PCBComponent } from '../../types/pcb';
-import { RefreshCw, Plus, Trash2, Edit3, X, SlidersHorizontal } from 'lucide-react';
-
-interface Pin {
-  name: string;
-  side: 'left' | 'right' | 'top' | 'bottom';
-  offset: number; // position offset from center
-}
-
-// Map component types to standard pin arrays
-const getPinsForType = (type: string): Pin[] => {
-  const t = type.toUpperCase();
-  if (t === 'MCU') {
-    return [
-      { name: 'VCC', side: 'left', offset: -20 },
-      { name: 'GND', side: 'left', offset: 20 },
-      { name: 'EN', side: 'left', offset: -10 },
-      { name: 'BOOT', side: 'left', offset: 0 },
-      { name: 'RXD', side: 'right', offset: -10 },
-      { name: 'TXD', side: 'right', offset: 0 },
-      { name: 'RF_OUT', side: 'right', offset: -20 },
-      { name: 'GPIO', side: 'right', offset: 10 },
-    ];
-  }
-  if (t === 'CONNECTOR') {
-    return [
-      { name: 'VBUS', side: 'right', offset: -10 },
-      { name: 'DP', side: 'right', offset: 0 },
-      { name: 'DN', side: 'right', offset: 10 },
-      { name: 'GND', side: 'left', offset: 10 },
-    ];
-  }
-  if (t === 'LDO') {
-    return [
-      { name: 'IN', side: 'left', offset: -10 },
-      { name: 'GND', side: 'bottom', offset: 0 },
-      { name: 'OUT', side: 'right', offset: -10 },
-    ];
-  }
-  if (t === 'OP-AMP' || t === 'ADC') {
-    return [
-      { name: 'IN+', side: 'left', offset: -10 },
-      { name: 'IN-', side: 'left', offset: 10 },
-      { name: 'OUT', side: 'right', offset: 0 },
-      { name: 'VCC', side: 'top', offset: 0 },
-      { name: 'GND', side: 'bottom', offset: 0 },
-    ];
-  }
-  // 2-pin passives (Capacitors, Resistors, Inductors, Oscillators)
-  return [
-    { name: '1', side: 'left', offset: 0 },
-    { name: '2', side: 'right', offset: 0 },
-  ];
-};
+import { RefreshCw, Plus, Trash2, Edit3, X, SlidersHorizontal, Check, Sparkles } from 'lucide-react';
+import { getPinsForType, getLogicalNetForPin, autoRouteBoardNets } from '../../lib/core/netlist';
 
 export const SchematicCanvas: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -70,6 +19,7 @@ export const SchematicCanvas: React.FC = () => {
   const [newPartType, setNewPartType] = useState<'RESISTOR' | 'CAPACITOR' | 'LED' | 'IC'>('RESISTOR');
   const [newPartValue, setNewPartValue] = useState<string>('1k');
   const [newPartNet, setNewPartNet] = useState<string>('net-new');
+  const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -152,41 +102,24 @@ export const SchematicCanvas: React.FC = () => {
         else if (pin.side === 'top') { px += offset; py -= h / 2; }
         else if (pin.side === 'bottom') { px += offset; py += h / 2; }
 
-        // Find which net connects to this component and this logical pin
-        // For a smart schematic simulation, we map:
-        // - EN pin to net-en / rat-en
-        // - VCC/VBUS/3.3V pins to matching power supply nets
-        // - GND to ground net
-        // - Logical passives pin 1 to VCC or input net, pin 2 to output or GND
-        let pinNet = 'GND';
+        // Find which net connects to this component and this logical pin using our robust template-aware solver
+        let pinNet = getLogicalNetForPin(comp.id, comp.name, comp.type, pin.name);
 
-        const pinNameLower = pin.name.toLowerCase();
-        if (pinNameLower === 'vcc' || pinNameLower === 'vbus' || pinNameLower === 'in') {
-          // Look up if there are vcc/pwr traces in proximity to this component
-          const pwrTrace = board.traces.find(t => t.netId.includes('vcc') || t.netId.includes('5v') || t.netId.includes('pwr') || t.netId.includes('in'));
-          pinNet = pwrTrace ? pwrTrace.netId : 'VCC';
-        } else if (pinNameLower === 'gnd' || pinNameLower === 'bottom' || pin.name === '2' && comp.name.toLowerCase().includes('decouple')) {
-          pinNet = 'GND';
-        } else if (pinNameLower === 'en') {
-          pinNet = 'en';
-        } else if (pinNameLower === 'rf_out' || comp.type === 'RF_ANTENNA') {
-          pinNet = 'wifi-ant-rf';
-        } else if (pinNameLower === 'dp') {
-          pinNet = 'usb-dp';
-        } else if (pinNameLower === 'dn') {
-          pinNet = 'usb-dn';
-        } else if (pinNameLower === 'sclk' || pinNameLower === 'spi_sck') {
-          pinNet = 'spi_sck';
-        } else if (pinNameLower === 'miso' || pinNameLower === 'spi_miso') {
-          pinNet = 'spi_miso';
-        } else {
-          // Fallback based on connected trace or default
-          const matchedTrace = board.traces.find(t => {
-            const distStart = Math.sqrt((t.startX - comp.x) ** 2 + (t.startY - comp.y) ** 2);
-            const distEnd = Math.sqrt((t.endX - comp.x) ** 2 + (t.endY - comp.y) ** 2);
-            return distStart < 40 || distEnd < 40;
+        // If the logical net turns out to be a generic fallback, check physical spatial traces
+        if (pinNet.startsWith('net-') && pinNet.includes(comp.id)) {
+          const connections = [
+            ...board.traces.map(t => ({ netId: t.netId, startX: t.startX, startY: t.startY, endX: t.endX, endY: t.endY })),
+            ...board.ratnest.map(r => ({ netId: r.netId, startX: r.startX, startY: r.startY, endX: r.endX, endY: r.endY }))
+          ].filter(conn => {
+            const distStart = Math.sqrt((conn.startX - comp.x) ** 2 + (conn.startY - comp.y) ** 2);
+            const distEnd = Math.sqrt((conn.endX - comp.x) ** 2 + (conn.endY - comp.y) ** 2);
+            return distStart < 60 || distEnd < 60;
           });
-          pinNet = matchedTrace ? matchedTrace.netId : `net-${comp.id}-${pin.name}`;
+
+          if (connections.length > 0) {
+            const matched = connections.find(c => c.netId.toLowerCase().includes(pin.name.toLowerCase())) || connections[0];
+            pinNet = matched.netId;
+          }
         }
 
         if (!netToPinsMap[pinNet]) {
@@ -226,7 +159,23 @@ export const SchematicCanvas: React.FC = () => {
     });
 
     return wires;
-  }, [schemComponents, board.traces]);
+  }, [schemComponents, board.traces, board.ratnest]);
+
+  // Dynamic set of existing nets for auto-completion
+  const existingNets = useMemo(() => {
+    const nets = new Set<string>();
+    nets.add('gnd');
+    nets.add('vcc-5v');
+    nets.add('vcc-3.3v');
+    nets.add('wifi-ant-rf');
+    nets.add('en');
+    nets.add('usb-dp');
+    nets.add('usb-dn');
+    
+    board.traces.forEach(t => { if (t.netId) nets.add(t.netId); });
+    board.ratnest.forEach(r => { if (r.netId) nets.add(r.netId); });
+    return Array.from(nets);
+  }, [board.traces, board.ratnest]);
 
   // Touch handlers for panning and zooming on mobile
   const lastTouchDistance = useRef<number | null>(null);
@@ -323,46 +272,49 @@ export const SchematicCanvas: React.FC = () => {
       }
     ];
 
-    commitTransaction({
+    const fullyRouted = autoRouteBoardNets({
       ...board,
       components: updatedComponents,
       ratnest: updatedRatnest
     });
 
+    commitTransaction(fullyRouted);
+
     setSelectedComponentId(id);
-    alert(`Successfully synced component ${id} (${name}) with ratsnest net connection to "${newPartNet}" on the PCB board layout!`);
+    setSyncFeedback(`Synced symbol ${id} on net "${newPartNet}"`);
+    setTimeout(() => setSyncFeedback(null), 4000);
   };
 
   // Delete component from Schematic & erase footprint + traces from layout
   const handleDeleteComponentWithSync = (compId: string) => {
     if (!compId) return;
-    if (confirm(`Remove component ${compId} and all its connected traces & airwires?`)) {
-      const updatedComponents = board.components.filter(c => c.id !== compId);
-      const updatedTraces = board.traces.filter(t => {
-        // Disconnect traces near that component center
-        const comp = board.components.find(c => c.id === compId);
-        if (!comp) return true;
-        const distStart = Math.sqrt((t.startX - comp.x) ** 2 + (t.startY - comp.y) ** 2);
-        const distEnd = Math.sqrt((t.endX - comp.x) ** 2 + (t.endY - comp.y) ** 2);
-        return distStart >= 40 && distEnd >= 40;
-      });
-      const updatedRatnest = board.ratnest.filter(r => {
-        const comp = board.components.find(c => c.id === compId);
-        if (!comp) return true;
-        const distStart = Math.sqrt((r.startX - comp.x) ** 2 + (r.startY - comp.y) ** 2);
-        const distEnd = Math.sqrt((r.endX - comp.x) ** 2 + (r.endY - comp.y) ** 2);
-        return distStart >= 40 && distEnd >= 40;
-      });
+    const updatedComponents = board.components.filter(c => c.id !== compId);
+    const updatedTraces = board.traces.filter(t => {
+      // Disconnect traces near that component center
+      const comp = board.components.find(c => c.id === compId);
+      if (!comp) return true;
+      const distStart = Math.sqrt((t.startX - comp.x) ** 2 + (t.startY - comp.y) ** 2);
+      const distEnd = Math.sqrt((t.endX - comp.x) ** 2 + (t.endY - comp.y) ** 2);
+      return distStart >= 40 && distEnd >= 40;
+    });
+    const updatedRatnest = board.ratnest.filter(r => {
+      const comp = board.components.find(c => c.id === compId);
+      if (!comp) return true;
+      const distStart = Math.sqrt((r.startX - comp.x) ** 2 + (r.startY - comp.y) ** 2);
+      const distEnd = Math.sqrt((r.endX - comp.x) ** 2 + (r.endY - comp.y) ** 2);
+      return distStart >= 40 && distEnd >= 40;
+    });
 
-      commitTransaction({
-        ...board,
-        components: updatedComponents,
-        traces: updatedTraces,
-        ratnest: updatedRatnest
-      });
+    commitTransaction({
+      ...board,
+      components: updatedComponents,
+      traces: updatedTraces,
+      ratnest: updatedRatnest
+    });
 
-      setSelectedComponentId(null);
-    }
+    setSelectedComponentId(null);
+    setSyncFeedback(`Erased symbol ${compId} from design workspace`);
+    setTimeout(() => setSyncFeedback(null), 4000);
   };
 
   const selectedCompData = useMemo(() => {
@@ -709,6 +661,19 @@ export const SchematicCanvas: React.FC = () => {
           >
             <RefreshCw size={11} /> Reset Sheet Zoom
           </button>
+          <button 
+            onClick={() => {
+              const fullyRouted = autoRouteBoardNets(board);
+              commitTransaction(fullyRouted);
+              setSyncFeedback("Auto-Fix Complete: Same-net paths mapped dynamically!");
+              setTimeout(() => setSyncFeedback(null), 4000);
+            }}
+            id="btn-auto-fix-nets"
+            className="bg-[#111116]/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/5 hover:border-emerald-500/30 text-[9px] uppercase font-mono text-emerald-400 flex items-center gap-1 transition-all"
+            title="Automatically run orthogonal same-net routing checks and generate ratsnest airwires for direct sync"
+          >
+            <Sparkles size={11} className="text-emerald-400 animate-pulse" /> Complete Connections
+          </button>
         </div>
 
         {/* FLOATING ACTION TRIGGER ON MOBILE FOR DRAWER */}
@@ -765,6 +730,13 @@ export const SchematicCanvas: React.FC = () => {
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {syncFeedback && (
+            <div className="bg-[#10b981]/10 border border-[#10b981]/25 p-3 rounded-lg text-[#10b981] text-[10px] font-bold flex items-center gap-2 animate-in fade-in duration-200">
+              <Check size={11} strokeWidth={3} />
+              {syncFeedback}
+            </div>
+          )}
+
           {activeToolTab === 'place' && (
             <div className="space-y-4 text-xs">
               <div className="bg-indigo-500/5 border border-indigo-500/10 p-3 rounded-lg leading-relaxed text-gray-400">
@@ -807,18 +779,22 @@ export const SchematicCanvas: React.FC = () => {
 
               <div className="space-y-1.5">
                 <label className="text-[9px] font-black uppercase tracking-wider text-gray-400 block">Net Connectivity ID</label>
-                <select
+                <input
+                  type="text"
+                  list="schematic-nets-datalist"
                   value={newPartNet}
                   onChange={(e) => setNewPartNet(e.target.value)}
-                  className="w-full bg-[#15151a] border border-white/5 hover:border-indigo-500/20 text-white rounded-lg py-1.5 px-3 font-mono text-[11px] focus:outline-none transition-all cursor-pointer"
-                >
-                  <option value="gnd">Ground Plane (GND)</option>
-                  <option value="vcc-5v">Regulated 5V Supply</option>
-                  <option value="vcc-3.3v">Low Potential 3.3V</option>
-                  <option value="wifi-ant-rf">Wi-Fi Antenna feed RF Net</option>
-                  <option value="net-en">Hardware EN Reset Node</option>
-                  <option value="custom_signal_bus">Custom Input Bus Net</option>
-                </select>
+                  className="w-full bg-[#15151a] border border-white/5 hover:border-indigo-500/20 text-white rounded-lg py-1.5 px-3 font-mono text-[11px] focus:outline-none transition-all placeholder-gray-600"
+                  placeholder="Type or select a net..."
+                />
+                <datalist id="schematic-nets-datalist">
+                  {existingNets.map((net) => (
+                    <option key={net} value={net}>
+                      {net === 'gnd' ? 'Ground Plane (GND)' : net}
+                    </option>
+                  ))}
+                </datalist>
+                <span className="text-[8px] text-gray-500 font-mono italic block">Supports keying custom paths to autotrack.</span>
               </div>
 
               <button

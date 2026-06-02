@@ -7,6 +7,7 @@ interface TransactionState {
   lastSaveTime: number;
   selectedComponentId: string | null;
   selectedTraceId: string | null;
+  experienceLevel: 'beginner' | 'intermediate' | 'advanced' | null;
   commitTransaction: (board: PCBBoard) => void;
   undo: () => PCBBoard | null;
   redo: () => PCBBoard | null;
@@ -14,6 +15,7 @@ interface TransactionState {
   loadBoard: (board: PCBBoard) => void;
   setSelectedComponentId: (id: string | null) => void;
   setSelectedTraceId: (id: string | null) => void;
+  setExperienceLevel: (level: 'beginner' | 'intermediate' | 'advanced' | null) => void;
 }
 
 export const useTransactionStore = create<TransactionState>((set, get) => ({
@@ -48,9 +50,20 @@ export const useTransactionStore = create<TransactionState>((set, get) => ({
   lastSaveTime: Date.now(),
   selectedComponentId: null,
   selectedTraceId: null,
+  experienceLevel: (typeof window !== 'undefined' ? localStorage.getItem('novacircuit_experience_level') : null) as 'beginner' | 'intermediate' | 'advanced' | null,
   
   setSelectedComponentId: (id: string | null) => set({ selectedComponentId: id, selectedTraceId: null }),
   setSelectedTraceId: (id: string | null) => set({ selectedTraceId: id, selectedComponentId: null }),
+  setExperienceLevel: (level: 'beginner' | 'intermediate' | 'advanced' | null) => {
+    if (typeof window !== 'undefined') {
+      if (level) {
+        localStorage.setItem('novacircuit_experience_level', level);
+      } else {
+        localStorage.removeItem('novacircuit_experience_level');
+      }
+    }
+    set({ experienceLevel: level });
+  },
   
   commitTransaction: (board: PCBBoard) => set((state) => {
     const newHistory = state.history.slice(0, state.currentIndex + 1);

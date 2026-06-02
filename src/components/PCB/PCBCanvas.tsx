@@ -60,7 +60,8 @@ export const PCBCanvas: React.FC = () => {
   }, []);
 
   // Stackup Config
-  const [dielectricHeight, setDielectricHeight] = useState<number>(1.6); // mm
+  const [layersCount, setLayersCount] = useState<number>(4);
+  const [dielectricHeight, setDielectricHeight] = useState<number>(0.2); // mm, default prepreg for 4-layer boards
   const [dielectricConstant, setDielectricConstant] = useState<number>(4.4); // FR-4
   const [copperThickness, setCopperThickness] = useState<number>(35); // um (1oz)
   const [targetImpedance, setTargetImpedance] = useState<50 | 90 | 100>(50);
@@ -401,8 +402,8 @@ export const PCBCanvas: React.FC = () => {
       >
         {/* Onboarding templates wizard - show if we have only random or empty layout default */}
         {board.components.length > 200 && (
-          <div className="absolute inset-0 bg-[#07070b]/95 z-40 flex flex-col items-center justify-center p-8">
-            <div className="max-w-2xl text-center flex flex-col items-center">
+          <div className="absolute inset-0 bg-[#07070b]/95 z-40 flex flex-col items-center justify-start py-12 px-6 sm:px-8 overflow-y-auto scrollbar-thin">
+            <div className="max-w-2xl text-center flex flex-col items-center my-auto">
               <div className="w-16 h-16 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center mb-6">
                 <Sparkles className="text-indigo-400 w-8 h-8 animate-pulse" />
               </div>
@@ -531,7 +532,7 @@ export const PCBCanvas: React.FC = () => {
           isSidebarOpenMobile ? 'translate-x-0' : 'translate-x-full lg:translate-x-0'
         }`}
       >
-        <div className="flex items-center justify-between px-4 py-2 bg-[#14141d]/50 border-b border-white/5 lg:hidden">
+        <div className="flex items-center justify-between px-4 py-2 bg-[#14141d]/50 border-b border-white/5 lg:hidden shrink-0">
           <span className="text-[10px] font-black uppercase tracking-wider">Suite Inspector</span>
           <button 
             onClick={() => setIsSidebarOpenMobile(false)}
@@ -541,7 +542,7 @@ export const PCBCanvas: React.FC = () => {
           </button>
         </div>
 
-        <div className="flex h-12 border-b border-white/5 bg-[#0a0a0f]/50">
+        <div className="flex h-12 border-b border-white/5 bg-[#0a0a0f]/50 shrink-0">
           <button
             onClick={() => setActiveTab('stackup')}
             className={`flex-1 flex items-center justify-center gap-2 text-[10px] font-bold tracking-widest uppercase transition-colors outline-none pb-0.5 ${
@@ -579,6 +580,76 @@ export const PCBCanvas: React.FC = () => {
                 <p className="text-[10px] text-gray-400 leading-relaxed">
                   Adjust dielectric substrates and foil thickness to match fabrication tolerances. Custom width is solved via IPC-2141 microstrip.
                 </p>
+              </div>
+
+              {/* Layer count selector */}
+              <div className="space-y-2">
+                <label className="text-[10px] font-black uppercase text-gray-400 tracking-wider">PCB Board Layer Count</label>
+                <div className="grid grid-cols-4 gap-2">
+                  {[2, 4, 6, 8].map(num => (
+                    <button
+                      key={num}
+                      onClick={() => {
+                        setLayersCount(num);
+                        // Auto-adjust default heights based on layers
+                        if (num === 2) setDielectricHeight(1.6);
+                        else if (num === 4) setDielectricHeight(0.2);
+                        else if (num === 6) setDielectricHeight(0.15);
+                        else if (num === 8) setDielectricHeight(0.1);
+                      }}
+                      className={`py-2 text-xs font-mono font-black rounded-lg border transition-all ${
+                        layersCount === num
+                          ? 'bg-indigo-600 text-white border-indigo-500'
+                          : 'bg-[#15151a] border-white/5 hover:border-white/20 text-gray-400'
+                      }`}
+                    >
+                      {num}L
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Stackup Layer Diagram */}
+              <div className="bg-[#111116] border border-white/5 p-4 rounded-xl space-y-3">
+                <div className="text-[9px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  {layersCount}-Layer Foil Stackup Core
+                </div>
+                <div className="space-y-1.5 font-mono text-[9px]">
+                  {Array.from({ length: layersCount }).map((_, index) => {
+                    const isSignal = index === 0 || index === layersCount - 1;
+                    const isGnd = index === 1 || (layersCount >= 8 && index === 6);
+                    const isPwr = index === layersCount - 2;
+                    let label = `Inner Plane ${index}`;
+                    if (isSignal) label = index === 0 ? 'L1: Top Signal (GTL)' : `L${layersCount}: Bottom Signal (GBL)`;
+                    else if (isGnd) label = `L${index + 1}: Inner GND Plane`;
+                    else if (isPwr) label = `L${index + 1}: Inner PWR Rail Plane`;
+                    else label = `L${index + 1}: Inner Signal Route`;
+
+                    return (
+                      <div key={index} className="space-y-1">
+                        {/* Copper Foil */}
+                        <div className="flex items-center gap-2">
+                          <span className="w-2.5 h-2 rounded bg-amber-600 shrink-0" />
+                          <span className="text-gray-300 font-bold">{label}</span>
+                          <span className="ml-auto text-[8px] text-gray-500">copper ({copperThickness}µm)</span>
+                        </div>
+                        {/* Dielectric insulation layer (not after last copper sheet) */}
+                        {index < layersCount - 1 && (
+                          <div className="ml-5 pl-3 border-l-2 border-indigo-500/20 py-2.5 flex items-center gap-2 text-gray-500 text-[8px]">
+                            <span className="w-2 h-2.5 rounded bg-indigo-500/10 border border-indigo-500/10 shrink-0" />
+                            <span>
+                              {index === 0 || index === layersCount - 2 ? 'FR-4 Prepreg' : 'FR-4 Rigid Core'}
+                            </span>
+                            <span className="ml-auto text-gray-400 font-bold">
+                              {(dielectricHeight / (layersCount / 2)).toFixed(2)}mm
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Target Impedance Selector */}
@@ -855,7 +926,7 @@ export const PCBCanvas: React.FC = () => {
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
           <div className="bg-[#111116] border border-white/10 rounded-2xl w-full max-w-xl flex flex-col max-h-[85vh] overflow-hidden shadow-2xl">
             {/* Modal Header */}
-            <header className="p-4 border-b border-white/5 flex items-center justify-between bg-[#14141c]">
+            <header className="p-4 border-b border-white/5 flex items-center justify-between bg-[#14141c] shrink-0">
               <div>
                 <h3 className="text-xs font-black uppercase text-white tracking-widest">NovaCircuit Validation Diagnostic</h3>
                 <span className="text-[8.5px] font-mono text-gray-500">{new Date(activeReport.timestamp).toLocaleString()}</span>
@@ -869,7 +940,7 @@ export const PCBCanvas: React.FC = () => {
             </header>
 
             {/* Scoreboard and metrics summary */}
-            <div className="p-5 overflow-y-auto space-y-6">
+            <div className="p-5 overflow-y-auto space-y-6 flex-1">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 rounded-xl bg-[#15151e] border border-white/5 gap-3">
                 <div>
                   <div className="text-[9px] font-black uppercase tracking-wider text-gray-400">Design Verification outcome</div>
@@ -927,7 +998,7 @@ export const PCBCanvas: React.FC = () => {
             </div>
 
             {/* Footer containing downloading tools */}
-            <footer className="p-4 border-t border-white/5 bg-[#14141d]/70 flex flex-col sm:flex-row gap-2">
+            <footer className="p-4 border-t border-white/5 bg-[#14141d]/70 flex flex-col sm:flex-row gap-2 shrink-0">
               <button
                 onClick={downloadReportHTML}
                 className="flex-1 flex items-center justify-center gap-1.5 py-2.5 bg-indigo-600 hover:bg-indigo-500 transition-colors text-white font-bold text-[10px] uppercase tracking-wider rounded-lg shadow-md"
