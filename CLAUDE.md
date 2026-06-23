@@ -8,8 +8,9 @@
 - **IPC-2141 Microstrip Solver**: Closed-form impedance calculations to dynamically adjust trace widths for target impedances (50Ω, 90Ω, 100Ω) on FR-4 and PTFE/Rogers substrates
 - **Serpentine Length Tuning**: Automatic wiggle injection for propagation flight-time/phase matching on parallel digital buses
 - **Spatial Quadtree Rendering**: 60 FPS viewport culling via spatial indexing for virtualized SVG layout visualization
-- **DRC/DFM Validation**: Acid trap detection, minimum annular ring width checks, copper clearance validation, ratsnest completion reporting
+- **DRC/DFM Validation**: Acid trap detection, minimum annular ring width checks, copper clearance validation, ratsnest completion reporting, **via aspect ratio DRC**
 - **PDN Impedance Analyzer**: Power Distribution Network analysis including frequency-domain PDN impedance curves, decoupling capacitor optimization, target impedance validation, and resonance detection
+- **Via Management**: Full blind, buried, and micro-via support with per-via type constraints and aspect ratio Design Rule Checks
 - **Gerber/BOM/Pick-and-Place Export**: RS-274X Gerber, Bill of Materials, and CSV pick-and-place file generation
 - **AI Copilot**: Server-side Gemini API integration for grounding and design suggestions
 - **Preconfigured Templates**: ESP32 IoT Dev Board, USB-PD 65W Buck Regulator, STM32 Analog Front-End
@@ -45,7 +46,7 @@ NovaCircuit follows a **layered separation of concerns** architecture:
 Browser Client (React + Vite)
     └── Components Layer        → Visual UI and canvas renderers
         └── State Layer         → Zustand transaction store
-            └── Core Logic Layer → Netlist, routing, spatial indexing, PDN analysis
+            └── Core Logic Layer → Netlist, routing, spatial indexing, PDN analysis, via management
                 └── Types Layer  → PCB data model definitions
 
 Express Server (server.ts)
@@ -60,6 +61,7 @@ Express Server (server.ts)
 5. **Export** → Board state serialized by `exporter.ts` → Zip file via jszip
 6. **AI Suggestions** → Frontend calls Express server → Proxied to Gemini API
 7. **PDN Analysis** → Board state parsed for power nets/decoupling caps → Frequency-domain impedance computed client-side → Results rendered in `PDNAnalyzer` panel
+8. **Via DRC** → Via array traversed → per-via aspect ratio and type constraints validated client-side → violations surfaced in DRC panel
 
 ---
 
@@ -78,7 +80,7 @@ novacircuit/
     ├── App.tsx               # Root component → renders <PCBEditor />
     ├── index.css             # Tailwind directives + no-scrollbar utility
     ├── types/
-    │   └── pcb.ts            # Core EDA type definitions (includes PDN types)
+    │   └── pcb.ts            # Core EDA type definitions (includes PDN + via types)
     ├── lib/
     │   ├── core/
     │   │   ├── netlist.ts    # Pin definitions, logical net resolution
@@ -88,6 +90,7 @@ novacircuit/
     │   ├── exporter.ts       # Gerber RS-274X, BOM, CSV pick-and-place
     │   ├── routingSystem.ts  # Manhattan router + impedance trace calculator
     │   ├── pdnAnalyzer.ts    # PDN impedance solver, decoupling optimizer
+    │   ├── viaManager.ts     # Via type definitions, aspect ratio DRC, via rules engine
     │   └── orchestrator.ts   # Bridge logic between subsystems
     └── components/
         ├── PCBEditor.tsx     # Grand workspace (sidebar, chat, split-view)
@@ -96,11 +99,13 @@ novacircuit/
         ├── OnboardingDialog.tsx # Experience-level selector
         ├── ErrorBoundary.tsx # Production failure isolation
         ├── PDNAnalyzer.tsx   # PDN impedance analysis panel/overlay
+        ├── ViaManager.tsx    # Via placement, type selection, DRC results UI
         └── PCB/
             ├── PCBCanvas.tsx         # Multi-layer copper workspace
             ├── SchematicCanvas.tsx   # Schematic symbol capture sheet
             ├── ComponentRenderer.tsx # Component footprint visuals
             ├── TraceRenderer.tsx     # Copper trace routing layer
+            ├── ViaRenderer.tsx       # Via visualization (blind/buried/micro/through)
             └── RatsnestLayer.tsx     # Same-net airwire visualizer
 ```
 
@@ -110,10 +115,11 @@ novacircuit/
 
 ### `src/types/pcb.ts`
 **The single source of truth for all EDA data structures.** Defines:
-- `PCBBoard` — top-level board containing components, traces, and ratsnest
+- `PCBBoard` — top-level board containing components, traces, ratsnest, and **vias**
 - `PCBComponent` — placed component with `id`, `x`, `y`, `rotation`, `name`, `type`
 - `PCBTrace` — routed copper trace with `id`, `startX/Y`, `endX/Y`, `width`, `netId`
 - `PCBRatsnest` — unrouted airwire connection with `id`, `startX/Y`, `endX/Y`, `netId`
+- **Via types**: `ViaType`, `PCBVia`, `ViaConstraints`, `ViaAspectRatioDRCResult`, `ViaDRCViolation`
 - **PDN types**: `DecouplingCapacitor`, `PDNNode`, `PDNAnalysisResult`, `PDNImpedancePoint`, `PDNResonance`, `DecouplingRecommendation`
 
 ### `src/lib/core/transaction.ts`
@@ -121,9 +127,10 @@ novacircuit/
 - Maintains `history: PCBBoard[]` array and `currentIndex` pointer for undo/redo
 - `commitTransaction(board)` — pushes new board state, auto-saves every 30 seconds
 - `undo()` / `redo()` — returns the target `PCBBoard` state
-- `selectedComponentId` / `selectedTraceId` — mutually exclusive selection state
+- `selectedComponentId` / `selectedTraceId` / `selectedViaId` — mutually exclusive selection state
 - `experienceLevel` — persisted to `localStorage` as `novacircuit_experience_level`
 - `pdnAnalysisResult` — cached last PDN analysis result (not part of undo history)
+- `viaDRCResults` — cached last via DRC validation results (not part of undo history)
 - Initial state seeds **300 random components** and **150 random traces** (stress-test/demo data)
 
 ### `src/lib/core/netlist.ts`
@@ -154,11 +161,20 @@ Manhattan trace router and controlled-impedance trace width calculator.
 - Generates `DecouplingRecommendation[]` — suggested cap values, placement, and net assignments
 - All computation is **client-side** (no server round-trip)
 
+### `src/lib/viaManager.ts`
+**Via type definitions, constraint enforcement, and aspect ratio DRC engine.** Key responsibilities:
+- Defines via type taxonomy: `through` (spans all layers), `blind` (surface to inner layer), `buried` (inner layer to inner layer), `micro` (HDI laser-drilled, IPC-defined max aspect ratio)
+- Enforces per-type constraints: drill diameter limits, capture pad diameter, layer span rules
+- **Aspect ratio DRC**: validates `board_thickness / drill_diameter` against IPC-recommended maximums per via type (micro-via: ≤0.75:1, blind: ≤10:1, buried/through: ≤12:1 typical)
+- Generates `ViaDRCViolation[]` with violation type, affected via ID, computed ratio, and allowed maximum
+- Provides `ViaConstraints` configuration object consumed by `PCBCanvas` and `ViaManager` component
+- All computation is **client-side**
+
 ### `src/lib/exporter.ts`
-Generates Gerber RS-274X files, BOM spreadsheets, and CSV pick-and-place outputs; packaged via jszip for download.
+Generates Gerber RS-274X files, BOM spreadsheets, and CSV pick-and-place outputs; packaged via jszip for download. Now includes via drill data in Excellon drill file output.
 
 ### `src/lib/orchestrator.ts`
-Core bridge/coordinator logic connecting routing, netlist resolution, PDN analysis, and state management.
+Core bridge/coordinator logic connecting routing, netlist resolution, PDN analysis, via management, and state management.
 
 ### `server.ts`
 Express server that:
@@ -172,6 +188,7 @@ The **grand workspace** — primary layout container housing:
 - Split-view: `SchematicCanvas` + `PCBCanvas`
 - IPC stackup drawer (slide-up on mobile when trace selected)
 - PDN Analyzer panel (accessible via sidebar or toolbar)
+- Via Manager panel (accessible via sidebar or toolbar)
 
 ### `src/components/PDNAnalyzer.tsx`
 **PDN impedance analysis panel.** Key responsibilities:
@@ -181,6 +198,17 @@ The **grand workspace** — primary layout container housing:
 - Lists decoupling cap inventory parsed from board and optimization recommendations
 - Provides per-power-rail breakdown (each `vcc-*` net analyzed independently)
 - Integrates with `pdnAnalyzer.ts` lib; triggers re-analysis on board change or manual refresh
+
+### `src/components/ViaManager.tsx`
+**Via placement and DRC results panel.** Key responsibilities:
+- Provides UI for selecting via type (`through`, `blind`, `buried`, `micro`) before placement
+- Displays per-via type constraint summary (drill range, pad diameter, max aspect ratio)
+- Shows `ViaDRCViolation[]` list with severity, affected via, and suggested corrective action
+- Integrates with `viaManager.ts`; triggers re-validation on board change or manual refresh
+- Highlights violating vias in `PCBCanvas` via selected via ID mechanism
+
+### `src/components/PCB/ViaRenderer.tsx`
+**SVG via visualization layer.** Renders each `PCBVia` as a concentric circle (annular ring + drill symbol); color-coded by via type (through = white, blind = cyan, buried = yellow, micro = magenta); dashed outline on selected via.
 
 ---
 
@@ -206,80 +234,4 @@ interface PCBTrace {
   endX: number;
   endY: number;
   width: number;       // in mm — e.g., 0.18 (USB diff), 0.32 (RF 50Ω)
-  netId: string;       // e.g., "vcc-3.3v", "gnd", "usb-dp", "wifi-ant-rf"
-}
-
-interface PCBRatsnest {
-  id: string;
-  startX: number;
-  startY: number;
-  endX: number;
-  endY: number;
-  netId: string;
-}
-
-interface PCBBoard {
-  components: PCBComponent[];
-  traces: PCBTrace[];
-  ratnest: PCBRatsnest[];    // Note: field name is "ratnest" (not "ratsnest")
-}
-
-// PDN Analysis Types
-interface PDNImpedancePoint {
-  frequency: number;   // Hz
-  impedance: number;   // Ohms
-}
-
-interface PDNResonance {
-  frequency: number;   // Hz
-  impedance: number;   // Ohms (peak or anti-resonance trough)
-  type: 'resonance' | 'anti-resonance';
-}
-
-interface DecouplingCapacitor {
-  componentId: string;
-  capacitance: number; // Farads
-  esr: number;         // Equivalent Series Resistance, Ohms
-  esl: number;         // Equivalent Series Inductance, Henries
-  netId: string;       // Power net this cap decouples
-  mountingInductance?: number; // Via/pad inductance, Henries
-}
-
-interface DecouplingRecommendation {
-  netId: string;
-  suggestedValue: number;   // Farads
-  suggestedCount: number;
-  reason: string;
-  frequencyRange: [number, number]; // Hz
-}
-
-interface PDNAnalysisResult {
-  netId: string;
-  impedanceCurve: PDNImpedancePoint[];
-  targetImpedance: number;  // Ohms — derived from ΔV/ΔI budget
-  resonances: PDNResonance[];
-  recommendations: DecouplingRecommendation[];
-  passesTarget: boolean;   // true if Z < Z_target across full frequency range
-}
-```
-
----
-
-## Pin Type Reference
-
-Standard pin configurations returned by `getPinsForType()`:
-
-| Component Type | Pins |
-|---|---|
-| `MCU` | VCC, GND, EN, BOOT (left); RXD, TXD, RF_OUT, GPIO (right) |
-| `CONNECTOR` | VBUS, DP, DN (right); GND (left) |
-| `LDO` / `VOLTAGE_REF` | IN (left); GND (bottom); OUT (right) |
-| `OP-AMP` / `ADC` | IN+, IN- (left); OUT (right); VCC (top); GND (bottom) |
-| `MOSFET` | GATE (left); DRAIN (top); SOURCE (bottom) |
-| All passives (CAP, RES, IND, OSC) | 1 (left); 2 (right) |
-
----
-
-## State Management Patterns
-
-### Zustand Transaction
+  netId: string;       // e.g., "vcc-3.3v", "gnd", "usb-dp", "wifi-
