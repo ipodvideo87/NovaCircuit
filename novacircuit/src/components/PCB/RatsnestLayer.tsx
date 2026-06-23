@@ -1,48 +1,44 @@
-/**
- * RatsnestLayer — Unrouted airwire (ratsnest) visualizer
- *
- * Renders thin dashed lines between same-net pads that have not yet been
- * routed as copper traces. Colour-coded by net ID.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// RatsnestLayer
+//
+// Renders unrouted airwire connections (ratsnest) as dashed lines.
+// ─────────────────────────────────────────────────────────────────────────────
 
 import React from 'react';
-import type { PCBRatsnest } from '../../types/pcb';
+import { PCBRatsnest } from '../../types/pcb';
 
 interface RatsnestLayerProps {
   ratnest: PCBRatsnest[];
+  zoom: number;
+  panX: number;
+  panY: number;
 }
 
-const NET_COLORS: Record<string, string> = {
-  'vcc-3.3v':    '#f59e0b44',
-  'vcc-5v':      '#fb923c44',
-  'gnd':         '#47556944',
-  'usb-dp':      '#60a5fa44',
-  'usb-dn':      '#60a5fa44',
-  'wifi-ant-rf': '#34d39944',
-};
-
-function getRatsnestColor(netId: string): string {
-  if (NET_COLORS[netId]) return NET_COLORS[netId];
-  let hash = 0;
-  for (const ch of netId) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  const hue = hash % 360;
-  return `hsla(${hue}, 60%, 55%, 0.25)`;
+function sc(coord: number, zoom: number, pan: number): number {
+  return coord * zoom + pan;
 }
 
-const RatsnestLayer: React.FC<RatsnestLayerProps> = ({ ratnest }) => {
+export const RatsnestLayer: React.FC<RatsnestLayerProps> = ({
+  ratnest,
+  zoom,
+  panX,
+  panY,
+}) => {
   if (ratnest.length === 0) return null;
 
   return (
-    <g aria-label="Ratsnest airwire layer" opacity={0.8}>
-      {ratnest.map(rn => (
+    <g className="ratsnest-layer" opacity={0.4}>
+      {ratnest.map((rn) => (
         <line
           key={rn.id}
-          x1={rn.startX} y1={rn.startY}
-          x2={rn.endX}   y2={rn.endY}
-          stroke={getRatsnestColor(rn.netId)}
+          x1={sc(rn.startX, zoom, panX)}
+          y1={sc(rn.startY, zoom, panY)}
+          x2={sc(rn.endX,   zoom, panX)}
+          y2={sc(rn.endY,   zoom, panY)}
+          stroke="#ffffff"
           strokeWidth={0.8}
-          strokeDasharray="4 3"
-          strokeLinecap="round"
+          strokeDasharray="4 4"
+          strokeOpacity={0.5}
           pointerEvents="none"
         />
       ))}
