@@ -1,212 +1,246 @@
-/**
- * Orchestrator — Bridge logic between routing, netlist, and state
- *
- * Coordinates:
- *  - Ratsnest generation from netlist connectivity
- *  - Auto-route requests
- *  - DRC checks
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// NovaCircuit Orchestrator
+//
+// Bridge / coordinator between subsystems:
+//   • Netlist resolution → routing
+//   • Via management (type selection, DRC)
+//   • PDN analysis
+//   • State management (transaction store)
+// ─────────────────────────────────────────────────────────────────────────────
 
-import type { PCBBoard, PCBComponent, PCBRatsnest, PCBTrace } from '../types/pcb';
-import { getPinsForType, getLogicalNetForPin } from './core/netlist';
-import { autoRoute, solveTraceWidthForImpedance, SUBSTRATES } from './routingSystem';
+import {
+  PCBBoard,
+  PCBVia,
+  PCBTrace,
+  LayerId,
+  NetClass,
+  ViaType,
+  DEFAULT_NET_CLASSES,
+  StackupPreset,
+} from '../types/pcb';
 
-// ─── Ratsnest Generator ───────────────────────────────────────────────────────
+import {
+  routeSegment,
+  routeControlledImpedance,
+  getNetClass,
+  RouteResult,
+} from './routingSystem';
 
-interface PinWithNet {
-  compId: string;
-  pinName: string;
-  netId: string;
-  worldX: number;
-  worldY: number;
-}
+import {
+  createVia,
+  runViaDRC,
+  selectViaForTransition,
+  getDefaultStackup,
+  summarizeVias,
+  ViaSummary,
+} from './viaManager';
 
-/**
- * Generate ratsnest airwires for all unrouted same-net pin pairs.
- * Uses minimum spanning tree (nearest-neighbour) to minimise airwire crossings.
- */
-export function generateRatsnest(board: PCBBoard): PCBRatsnest[] {
-  // Collect all pin world-positions with their logical net
-  const pinsByNet = new Map<string, PinWithNet[]>();
+import { analyzePDN } from './pdnAnalyzer';
 
-  board.components.forEach(comp => {
-    const pins = getPinsForType(comp.type);
-    pins.forEach(pin => {
-      const netId = getLogicalNetForPin(comp.id, comp.name, comp.type, pin.name);
-      const worldX = comp.x + pin.x;
-      const worldY = comp.y + pin.y;
-      if (!pinsByNet.has(netId)) pinsByNet.set(netId, []);
-      pinsByNet.get(netId)!.push({ compId: comp.id, pinName: pin.name, netId, worldX, worldY });
-    });
-  });
-
-  // Build set of already-routed endpoints (approximate: trace start/end ± 5 units)
-  const routedEndpoints = new Set<string>();
-  board.traces.forEach(t => {
-    routedEndpoints.add(`${Math.round(t.startX / 5)},${Math.round(t.startY / 5)},${t.netId}`);
-    routedEndpoints.add(`${Math.round(t.endX / 5)},${Math.round(t.endY / 5)},${t.netId}`);
-  });
-
-  const ratsnest: PCBRatsnest[] = [];
-  let rnId = 0;
-
-  pinsByNet.forEach((pins, netId) => {
-    if (pins.length < 2) return;
-
-    // Nearest-neighbour: connect each pin to its closest unconnected same-net pin
-    const connected = new Set<number>([0]);
-    const unconnected = new Set<number>(pins.map((_, i) => i).slice(1));
-
-    while (unconnected.size > 0) {
-      let bestDist = Infinity;
-      let bestFrom = -1;
-      let bestTo = -1;
-
-      connected.forEach(ci => {
-        unconnected.forEach(ui => {
-          const dx = pins[ci].worldX - pins[ui].worldX;
-          const dy = pins[ci].worldY - pins[ui].worldY;
-          const d = dx * dx + dy * dy;
-          if (d < bestDist) {
-            bestDist = d;
-            bestFrom = ci;
-            bestTo = ui;
-          }
-        });
-      });
-
-      if (bestFrom === -1) break;
-
-      const from = pins[bestFrom];
-      const to = pins[bestTo];
-
-      // Skip if already routed (check both directions)
-      const fromKey = `${Math.round(from.worldX / 5)},${Math.round(from.worldY / 5)},${netId}`;
-      const toKey   = `${Math.round(to.worldX / 5)},${Math.round(to.worldY / 5)},${netId}`;
-      const isRouted = routedEndpoints.has(fromKey) && routedEndpoints.has(toKey);
-
-      if (!isRouted) {
-        ratsnest.push({
-          id: `rn-${rnId++}`,
-          startX: from.worldX,
-          startY: from.worldY,
-          endX: to.worldX,
-          endY: to.worldY,
-          netId,
-        });
-      }
-
-      connected.add(bestTo);
-      unconnected.delete(bestTo);
-    }
-  });
-
-  return ratsnest;
-}
-
-// ─── DRC Checks ──────────────────────────────────────────────────────────────
-
-export interface DRCViolation {
-  id: string;
-  type: 'CLEARANCE' | 'ACID_TRAP' | 'ANNULAR_RING' | 'UNROUTED' | 'MIN_WIDTH';
-  severity: 'error' | 'warning';
-  message: string;
-  x?: number;
-  y?: number;
-}
+// ── Board Mutation Helpers ─────────────────────────────────────────────────────
 
 /**
- * Run Design Rule Checks on the board.
+ * Applies a RouteResult to a PCBBoard — adds all trace segments and vias.
+ * Returns a new immutable board snapshot.
  */
-export function runDRC(board: PCBBoard): DRCViolation[] {
-  const violations: DRCViolation[] = [];
-  let id = 0;
-
-  // Unrouted nets
-  if (board.ratnest.length > 0) {
-    violations.push({
-      id: `drc-${id++}`,
-      type: 'UNROUTED',
-      severity: 'warning',
-      message: `${board.ratnest.length} unrouted connection(s) in ratsnest`,
-    });
-  }
-
-  // Minimum trace width check (IPC-2221: 0.1 mm minimum)
-  board.traces.forEach(trace => {
-    if (trace.width < 0.1) {
-      violations.push({
-        id: `drc-${id++}`,
-        type: 'MIN_WIDTH',
-        severity: 'error',
-        message: `Trace ${trace.id} width ${trace.width.toFixed(3)} mm below 0.1 mm minimum`,
-        x: (trace.startX + trace.endX) / 2,
-        y: (trace.startY + trace.endY) / 2,
-      });
-    }
-  });
-
-  // Acid trap detection: very short perpendicular segments forming acute angles
-  for (let i = 0; i < board.traces.length - 1; i++) {
-    const t1 = board.traces[i];
-    const t2 = board.traces[i + 1];
-    if (t1.netId !== t2.netId) continue;
-
-    const angle1 = Math.atan2(t1.endY - t1.startY, t1.endX - t1.startX);
-    const angle2 = Math.atan2(t2.endY - t2.startY, t2.endX - t2.startX);
-    const angleDiff = Math.abs(angle1 - angle2) * (180 / Math.PI);
-    if (angleDiff > 0 && angleDiff < 45) {
-      violations.push({
-        id: `drc-${id++}`,
-        type: 'ACID_TRAP',
-        severity: 'warning',
-        message: `Potential acid trap at trace junction (${angleDiff.toFixed(0)}° angle)`,
-        x: t1.endX,
-        y: t1.endY,
-      });
-    }
-  }
-
-  return violations;
-}
-
-// ─── Full Route Pass ──────────────────────────────────────────────────────────
-
-/**
- * Complete orchestrator action: generate ratsnest + auto-route + DRC.
- * Returns updated board and DRC report.
- */
-export function runFullRoutingPass(
+export function applyRouteResult(
   board: PCBBoard,
-  substrateKey = 'FR-4',
-): { board: PCBBoard; drcViolations: DRCViolation[] } {
-  const substrate = SUBSTRATES[substrateKey] ?? SUBSTRATES['FR-4'];
+  result: RouteResult
+): PCBBoard {
+  const newTraces = [
+    ...board.traces,
+    ...result.segments.map((s) => s.trace),
+  ];
+  const newVias = [...(board.vias ?? []), ...result.vias];
+  return { ...board, traces: newTraces, vias: newVias };
+}
 
-  // 1. Generate current ratsnest
-  const ratnest = generateRatsnest(board);
+/**
+ * Routes a net between two canvas coordinates and returns an updated board.
+ * Automatically:
+ *   1. Resolves net class from netId
+ *   2. Selects via type based on net class + stackup
+ *   3. Inserts via if layer transition is required
+ */
+export function routeNet(
+  board: PCBBoard,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  netId: string,
+  sourceLayer: LayerId = 'F.Cu',
+  targetLayer: LayerId = 'F.Cu',
+  traceWidthOverride = 0
+): PCBBoard {
+  const stackup = board.stackup ?? getDefaultStackup('4L');
+  const result  = routeSegment(
+    x1, y1, x2, y2,
+    netId,
+    sourceLayer, targetLayer,
+    stackup,
+    traceWidthOverride
+  );
+  return applyRouteResult(board, result);
+}
 
-  // 2. Auto-route all unrouted connections
-  const newTraces = autoRoute(ratnest);
+/**
+ * Routes a controlled-impedance trace (no via, single layer).
+ */
+export function routeImpedanceTrace(
+  board: PCBBoard,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  netId: string,
+  layer: LayerId,
+  targetImpedanceOhm: number
+): PCBBoard {
+  const stackup = board.stackup ?? getDefaultStackup('4L');
+  const result  = routeControlledImpedance(
+    x1, y1, x2, y2,
+    netId, layer,
+    targetImpedanceOhm,
+    stackup
+  );
+  return applyRouteResult(board, result);
+}
 
-  // Assign impedance-correct widths where net implies controlled impedance
-  const controlledTraces = newTraces.map(trace => {
-    if (/rf|ant/i.test(trace.netId)) {
-      return { ...trace, width: solveTraceWidthForImpedance(50, substrate) };
-    }
-    if (/usb|dp|dn/i.test(trace.netId)) {
-      return { ...trace, width: solveTraceWidthForImpedance(90, substrate) };
-    }
-    return trace;
-  });
+// ── Via Management ─────────────────────────────────────────────────────────────
 
-  const updatedBoard: PCBBoard = {
+/**
+ * Places a via at a specific canvas location.
+ * Chooses drill diameter and via type automatically from the net class.
+ */
+export function placeVia(
+  board: PCBBoard,
+  x: number,
+  y: number,
+  fromLayer: LayerId,
+  toLayer: LayerId,
+  netId: string,
+  drillOverrideMm?: number
+): PCBBoard {
+  const stackup  = board.stackup ?? getDefaultStackup('4L');
+  const netClass = getNetClass(netId);
+  const drill    = drillOverrideMm ?? (
+    netClass.viaDrillOverrideMm > 0
+      ? netClass.viaDrillOverrideMm
+      : undefined
+  );
+  const via      = createVia(x, y, fromLayer, toLayer, netId, stackup, drill);
+  return {
     ...board,
-    traces: [...board.traces, ...controlledTraces],
-    ratnest: [], // All routed
+    vias: [...(board.vias ?? []), via],
   };
+}
 
-  // 3. DRC
-  const drcViolations = runDRC(updatedBoard);
+/**
+ * Removes a via by id.
+ */
+export function removeVia(board: PCBBoard, viaId: string): PCBBoard {
+  return {
+    ...board,
+    vias: (board.vias ?? []).filter((v) => v.id !== viaId),
+  };
+}
 
-  return { board: updatedBoard, drcViolations };
+/**
+ * Updates a via's properties (returns new board snapshot).
+ */
+export function updateVia(board: PCBBoard, updated: PCBVia): PCBBoard {
+  return {
+    ...board,
+    vias: (board.vias ?? []).map((v) => (v.id === updated.id ? updated : v)),
+  };
+}
+
+// ── DRC ────────────────────────────────────────────────────────────────────────
+
+/**
+ * Runs IPC-6012 via DRC on the board.
+ * Returns a summary with violation details and pass/fail status.
+ */
+export function runBoardViaDRC(board: PCBBoard) {
+  const stackup = board.stackup ?? getDefaultStackup('4L');
+  return runViaDRC(board.vias ?? [], stackup);
+}
+
+/**
+ * Returns a via inventory summary (counts by type + DRC status).
+ */
+export function getBoardViaSummary(board: PCBBoard): ViaSummary {
+  const stackup = board.stackup ?? getDefaultStackup('4L');
+  return summarizeVias(board.vias ?? [], stackup);
+}
+
+// ── Stackup Operations ─────────────────────────────────────────────────────────
+
+/**
+ * Switches the board to a different stackup preset.
+ * Does not re-route existing traces; callers should trigger re-DRC.
+ */
+export function applyStackupPreset(board: PCBBoard, preset: StackupPreset): PCBBoard {
+  return {
+    ...board,
+    stackup: getDefaultStackup(preset),
+  };
+}
+
+// ── PDN Analysis ──────────────────────────────────────────────────────────────
+
+/**
+ * Runs PDN impedance analysis on all power nets in the board.
+ * Returns an array of per-net analysis results.
+ */
+export function runPDNAnalysis(board: PCBBoard) {
+  return analyzePDN(board);
+}
+
+// ── Ratsnest Completion ───────────────────────────────────────────────────────
+
+/**
+ * Counts unrouted connections (ratsnest airwires).
+ */
+export function getUnroutedCount(board: PCBBoard): number {
+  return board.ratnest.length;
+}
+
+/**
+ * Returns nets that have at least one unrouted connection.
+ */
+export function getUnroutedNets(board: PCBBoard): Set<string> {
+  return new Set(board.ratnest.map((r) => r.netId));
+}
+
+// ── Board Statistics ──────────────────────────────────────────────────────────
+
+export interface BoardStats {
+  componentCount: number;
+  traceCount: number;
+  viaCount: number;
+  unroutedCount: number;
+  stackupPreset: StackupPreset;
+  viaSummary: ViaSummary;
+  netCount: number;
+  uniqueNets: string[];
+}
+
+export function getBoardStats(board: PCBBoard): BoardStats {
+  const allNets = new Set([
+    ...board.traces.map((t) => t.netId),
+    ...board.ratnest.map((r) => r.netId),
+    ...(board.vias ?? []).map((v) => v.netId),
+  ]);
+  return {
+    componentCount: board.components.length,
+    traceCount:     board.traces.length,
+    viaCount:       board.vias?.length ?? 0,
+    unroutedCount:  board.ratnest.length,
+    stackupPreset:  board.stackup?.preset ?? '4L',
+    viaSummary:     getBoardViaSummary(board),
+    netCount:       allNets.size,
+    uniqueNets:     [...allNets].sort(),
+  };
 }

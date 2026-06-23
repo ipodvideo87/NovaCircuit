@@ -1,107 +1,102 @@
-/**
- * TraceRenderer — Copper trace routing layer
- *
- * Renders PCB traces as SVG lines with:
- *  • Net-coded color (power = amber, signal = blue, GND = grey, RF = emerald)
- *  • Width proportional to trace.width in mm
- *  • Selected highlight
- *  • Click-to-select interaction
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// TraceRenderer
+//
+// Renders all routed copper trace segments on the PCB canvas.
+// Colour-codes traces by layer and highlights selected/hovered traces.
+// ─────────────────────────────────────────────────────────────────────────────
 
-import React from 'react';
-import type { PCBTrace } from '../../types/pcb';
-import { useTransactionStore } from '../../lib/core/transaction';
+import React, { useCallback, useState } from 'react';
+import { PCBTrace, LayerId, LAYER_COLORS } from '../../types/pcb';
 
 interface TraceRendererProps {
   traces: PCBTrace[];
-  onTraceClick: (id: string) => void;
+  zoom: number;
+  panX: number;
+  panY: number;
+  selectedTraceId: string | null;
+  onSelectTrace: (id: string | null) => void;
 }
 
-// Net → colour mapping
-const NET_COLORS: Record<string, string> = {
-  'vcc-3.3v':    '#f59e0b',  // amber
-  'vcc-5v':      '#fb923c',  // orange
-  'vbus':        '#facc15',  // yellow
-  'gnd':         '#475569',  // slate
-  'usb-dp':      '#60a5fa',  // blue
-  'usb-dn':      '#60a5fa',  // blue
-  'wifi-ant-rf': '#34d399',  // emerald (RF — 50Ω)
-};
+const DEFAULT_TRACE_COLOR = '#f59e0b';
 
-function getTraceColor(netId: string): string {
-  if (NET_COLORS[netId]) return NET_COLORS[netId];
-  if (/vcc|vdd|pwr|3\.3|5v|1\.8|1\.2/i.test(netId)) return '#f59e0b';
-  if (/gnd|vss/i.test(netId)) return '#475569';
-  if (/rf|ant/i.test(netId)) return '#34d399';
-  if (/usb|dp|dn|diff/i.test(netId)) return '#60a5fa';
-  // Generic signal: derive from hash
-  let hash = 0;
-  for (const ch of netId) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  const hue = hash % 360;
-  return `hsl(${hue}, 70%, 55%)`;
+function traceColor(trace: PCBTrace): string {
+  if (trace.layer && trace.layer in LAYER_COLORS) {
+    return LAYER_COLORS[trace.layer as LayerId];
+  }
+  return DEFAULT_TRACE_COLOR;
 }
 
-// Map trace width in mm to canvas pixel stroke width (1 mm ≈ 3.78 px at 96 dpi)
-// Canvas units are not mm — we use a visual scale where 0.25 mm ≈ 2 canvas units stroke
-function traceStrokeWidth(widthMm: number): number {
-  return Math.max(1, widthMm * 8);
+function mmToPx(mm: number, zoom: number): number {
+  return mm * 3.779527559 * zoom;
 }
 
-const TraceRenderer: React.FC<TraceRendererProps> = ({ traces, onTraceClick }) => {
-  const selectedTraceId = useTransactionStore(s => s.selectedTraceId);
+function cx(x: number, zoom: number, pan: number): number {
+  return x * zoom + pan;
+}
+
+export const TraceRenderer: React.FC<TraceRendererProps> = ({
+  traces,
+  zoom,
+  panX,
+  panY,
+  selectedTraceId,
+  onSelectTrace,
+}) => {
+  const [hoverId, setHoverId] = useState<string | null>(null);
+
+  const handleClick = useCallback(
+    (id: string) => (e: React.MouseEvent) => {
+      e.stopPropagation();
+      onSelectTrace(id === selectedTraceId ? null : id);
+    },
+    [selectedTraceId, onSelectTrace]
+  );
 
   return (
-    <g aria-label="Copper trace layer">
-      {traces.map(trace => {
-        const color = getTraceColor(trace.netId);
-        const sw = traceStrokeWidth(trace.width);
-        const selected = trace.id === selectedTraceId;
+    <g className="trace-layer">
+      {traces.map((trace) => {
+        const isSelected = trace.id === selectedTraceId;
+        const isHovered  = trace.id === hoverId;
+        const color      = traceColor(trace);
+        const widthPx    = Math.max(1.5, mmToPx(trace.width, zoom));
+
+        const x1 = cx(trace.startX, zoom, panX);
+        const y1 = cx(trace.startY, zoom, panY);
+        const x2 = cx(trace.endX,   zoom, panX);
+        const y2 = cx(trace.endY,   zoom, panY);
+
         return (
           <g key={trace.id}>
-            {/* Selection halo */}
-            {selected && (
+            {/* Hit area (wider invisible stroke for easy click) */}
+            <line
+              x1={x1} y1={y1} x2={x2} y2={y2}
+              stroke="transparent"
+              strokeWidth={Math.max(8, widthPx * 2)}
+              style={{ cursor: 'pointer' }}
+              onClick={handleClick(trace.id)}
+              onMouseEnter={() => setHoverId(trace.id)}
+              onMouseLeave={() => setHoverId(null)}
+            />
+            {/* Selection glow */}
+            {(isSelected || isHovered) && (
               <line
-                x1={trace.startX} y1={trace.startY}
-                x2={trace.endX}   y2={trace.endY}
-                stroke="#22d3ee"
-                strokeWidth={sw + 4}
+                x1={x1} y1={y1} x2={x2} y2={y2}
+                stroke={color}
+                strokeWidth={widthPx + 4}
+                strokeOpacity={0.25}
                 strokeLinecap="round"
-                opacity={0.4}
+                pointerEvents="none"
               />
             )}
-            {/* Trace */}
+            {/* Copper trace */}
             <line
-              x1={trace.startX} y1={trace.startY}
-              x2={trace.endX}   y2={trace.endY}
+              x1={x1} y1={y1} x2={x2} y2={y2}
               stroke={color}
-              strokeWidth={sw}
+              strokeWidth={widthPx}
+              strokeOpacity={isSelected ? 1 : 0.75}
               strokeLinecap="round"
-              opacity={0.85}
-              onClick={() => onTraceClick(trace.id)}
-              className="cursor-pointer"
-              role="button"
-              aria-label={`Trace ${trace.netId} ${trace.width}mm`}
+              pointerEvents="none"
             />
-            {/* Via dots at endpoints for non-trivial traces */}
-            {(Math.abs(trace.endX - trace.startX) > 20 ||
-              Math.abs(trace.endY - trace.startY) > 20) && (
-              <>
-                <circle
-                  cx={trace.startX} cy={trace.startY}
-                  r={sw / 2 + 1}
-                  fill={color} opacity={0.6}
-                  onClick={() => onTraceClick(trace.id)}
-                  className="cursor-pointer"
-                />
-                <circle
-                  cx={trace.endX} cy={trace.endY}
-                  r={sw / 2 + 1}
-                  fill={color} opacity={0.6}
-                  onClick={() => onTraceClick(trace.id)}
-                  className="cursor-pointer"
-                />
-              </>
-            )}
           </g>
         );
       })}

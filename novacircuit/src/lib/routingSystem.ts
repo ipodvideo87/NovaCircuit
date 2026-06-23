@@ -1,161 +1,290 @@
-/**
- * Routing System
- *
- * Provides:
- *  - Manhattan (orthogonal) trace router
- *  - IPC-2141 controlled-impedance trace width calculator
- *    for microstrip (FR-4 and PTFE/Rogers) substrates
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// NovaCircuit Routing System
+//
+// Manhattan trace router with:
+//   • IPC-2141 controlled-impedance trace width calculation (microstrip)
+//   • Net-class-aware via type selection (blind / buried / micro)
+//   • Automatic layer transition via insertion using viaManager
+// ─────────────────────────────────────────────────────────────────────────────
 
-import type { PCBTrace } from '../types/pcb';
+import {
+  LayerId,
+  PCBTrace,
+  PCBVia,
+  PCBStackup,
+  NetClass,
+  DEFAULT_NET_CLASSES,
+  DEFAULT_STACKUPS,
+  STACKUP_LAYERS,
+  StackupPreset,
+} from '../types/pcb';
+import {
+  selectViaForTransition,
+  getDefaultStackup,
+  getStackupLayers,
+} from './viaManager';
 
-// ─── IPC-2141 Microstrip Impedance Calculator ─────────────────────────────────
+// ── IPC-2141A Microstrip Impedance Solver ─────────────────────────────────────
 
-export interface SubstrateParams {
-  /** Dielectric constant (FR-4 ≈ 4.3, Rogers RO4003 ≈ 3.55, PTFE ≈ 2.1) */
+export interface MicrostripParams {
+  /** Dielectric constant of substrate (εr) */
   er: number;
-  /** Dielectric thickness in mm (height above ground plane) */
-  h: number;
-  /** Copper thickness in mm (1 oz ≈ 0.035 mm) */
-  t: number;
+  /** Dielectric (prepreg) height in mm */
+  heightMm: number;
+  /** Copper trace width in mm */
+  widthMm: number;
+  /** Copper thickness in mm */
+  thicknessMm: number;
 }
 
-export const SUBSTRATES: Record<string, SubstrateParams> = {
-  'FR-4':          { er: 4.3,  h: 0.2,   t: 0.035 },
-  'Rogers RO4003': { er: 3.55, h: 0.2,   t: 0.035 },
-  'PTFE':          { er: 2.1,  h: 0.254, t: 0.035 },
-};
+export interface ImpedanceResult {
+  impedanceOhm: number;
+  effectiveEr: number;
+  /** Propagation delay in ps/mm */
+  propagationDelayPsPerMm: number;
+}
 
 /**
- * IPC-2141A closed-form microstrip impedance (Wheeler 1977 approximation).
+ * IPC-2141A closed-form microstrip impedance formula.
+ * Valid for w/h ratios from 0.1 to 2.0 (typical PCB trace geometries).
  *
- * Z0 = (87 / sqrt(er + 1.41)) * ln(5.98 * h / (0.8 * w + t))
+ * Z₀ = (87 / √(εr + 1.41)) × ln(5.98h / (0.8w + t))
  *
- * Valid for w/h < 3.3 (narrow traces). For wider traces a slightly different
- * formula applies but this is accurate to within 1–2% for typical PCB work.
+ * where h = dielectric height, w = trace width, t = copper thickness.
  */
-export function microstripImpedance(
-  traceWidthMm: number,
-  substrate: SubstrateParams,
-): number {
-  const { er, h, t } = substrate;
-  const w = traceWidthMm;
-  if (w <= 0 || h <= 0) return Infinity;
-
-  const numerator = 87;
-  const denominator = Math.sqrt(er + 1.41);
-  const argument = (5.98 * h) / (0.8 * w + t);
-  if (argument <= 1) return 0;
-  return (numerator / denominator) * Math.log(argument);
+export function calcMicrostripImpedance(p: MicrostripParams): ImpedanceResult {
+  const { er, heightMm: h, widthMm: w, thicknessMm: t } = p;
+  const wEff = w + t * (1 + Math.log(4 * Math.E * w / t)) / Math.PI;
+  const z0 = (87 / Math.sqrt(er + 1.41)) * Math.log(5.98 * h / (0.8 * wEff + t));
+  const eEff = (er + 1) / 2 + (er - 1) / 2 / Math.sqrt(1 + 12 * h / w);
+  const tpd = (1 / 0.2998) * Math.sqrt(eEff); // ps/mm (speed of light = 0.2998 mm/ps)
+  return { impedanceOhm: z0, effectiveEr: eEff, propagationDelayPsPerMm: tpd };
 }
 
 /**
- * Solve for trace width given a target impedance using bisection.
+ * Iteratively solves for the trace width (mm) that achieves `targetOhm`
+ * impedance on a given microstrip stackup layer, using Newton-Raphson.
  *
- * @param targetOhms  Target impedance (e.g. 50, 90, 100)
- * @param substrate   PCB substrate parameters
- * @param tolerance   Convergence tolerance in Ω (default 0.1)
- * @returns Trace width in mm
+ * @param targetOhm      Desired impedance in Ω
+ * @param er             Substrate dielectric constant
+ * @param heightMm       Dielectric height in mm
+ * @param thicknessMm    Copper thickness in mm
+ * @param tolerance      Convergence tolerance in Ω (default 0.1)
+ * @returns              Solved trace width in mm
  */
 export function solveTraceWidthForImpedance(
-  targetOhms: number,
-  substrate: SubstrateParams,
-  tolerance = 0.1,
+  targetOhm: number,
+  er: number,
+  heightMm: number,
+  thicknessMm: number,
+  tolerance = 0.1
 ): number {
-  let wLow = 0.01;    // 10 µm — minimum manufacturable
-  let wHigh = 10.0;   // 10 mm — unreasonably wide
+  let w = 0.2; // initial guess (mm)
+  for (let i = 0; i < 100; i++) {
+    const { impedanceOhm: z } = calcMicrostripImpedance({
+      er, heightMm, widthMm: w, thicknessMm,
+    });
+    const delta = z - targetOhm;
+    if (Math.abs(delta) < tolerance) break;
+    // Numerical derivative dZ/dw ≈ (Z(w+δ) - Z(w)) / δ
+    const dw = w * 1e-4;
+    const { impedanceOhm: z2 } = calcMicrostripImpedance({
+      er, heightMm, widthMm: w + dw, thicknessMm,
+    });
+    const dzdw = (z2 - z) / dw;
+    if (Math.abs(dzdw) < 1e-12) break;
+    w -= delta / dzdw;
+    w = Math.max(0.05, w); // clamp to manufacturable minimum
+  }
+  return Math.round(w * 10000) / 10000; // round to 0.1 µm
+}
 
-  // Check that target is achievable
-  const zAtLow  = microstripImpedance(wLow,  substrate);
-  const zAtHigh = microstripImpedance(wHigh, substrate);
-  if (targetOhms > zAtLow)  return wLow;
-  if (targetOhms < zAtHigh) return wHigh;
+// ── Net Class Helpers ─────────────────────────────────────────────────────────
 
-  for (let i = 0; i < 60; i++) {
-    const wMid = (wLow + wHigh) / 2;
-    const zMid = microstripImpedance(wMid, substrate);
-    if (Math.abs(zMid - targetOhms) < tolerance) return wMid;
-    if (zMid > targetOhms) {
-      wLow = wMid;   // Impedance decreases with width → widen
-    } else {
-      wHigh = wMid;
+/** Maps known net IDs to a net class name using naming conventions. */
+export function resolveNetClass(netId: string): string {
+  if (/^(vcc|vbus|vbat|pwr|3v3|5v)/.test(netId)) return 'Power';
+  if (/^(usb-dp|usb-dn|usb-cc)/.test(netId)) return 'USB-Diff';
+  if (/^(rf|wifi|ant|rf-ant)/.test(netId)) return 'RF';
+  if (/^(ddr|lvds|pcie|sgmii|serdes)/.test(netId)) return 'High-Speed';
+  return 'Default';
+}
+
+export function getNetClass(netId: string): NetClass {
+  const name = resolveNetClass(netId);
+  return DEFAULT_NET_CLASSES[name] ?? DEFAULT_NET_CLASSES['Default'];
+}
+
+// ── Route Segment Types ────────────────────────────────────────────────────────
+
+export interface RouteSegment {
+  trace: PCBTrace;
+}
+
+export interface RouteResult {
+  segments: RouteSegment[];
+  vias: PCBVia[];
+  totalLengthMm: number;
+}
+
+// ── Manhattan Router ──────────────────────────────────────────────────────────
+
+let _traceIdCounter = 10000;
+function nextTraceId(): string {
+  return `rt-${_traceIdCounter++}`;
+}
+
+/**
+ * Routes a net connection using an L-shaped (2-segment) Manhattan path.
+ *
+ * Layer transition rules:
+ *   • If `sourceLayer === targetLayer`  → single-layer route, no via
+ *   • If layers differ                  → insert a via at the bend point,
+ *     chosen by `selectViaForTransition` with net-class constraints
+ *
+ * @param x1, y1        Start coordinate (mm)
+ * @param x2, y2        End coordinate (mm)
+ * @param netId         Net identifier
+ * @param sourceLayer   Layer at start point
+ * @param targetLayer   Layer at end point
+ * @param stackup       Active board stackup
+ * @param traceWidth    Explicit trace width (mm); 0 = auto from net class
+ */
+export function routeSegment(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  netId: string,
+  sourceLayer: LayerId,
+  targetLayer: LayerId,
+  stackup: PCBStackup,
+  traceWidth = 0
+): RouteResult {
+  const netClass = getNetClass(netId);
+  const width = traceWidth > 0
+    ? traceWidth
+    : netClass.minTraceWidth;
+
+  const segments: RouteSegment[] = [];
+  const vias: PCBVia[] = [];
+
+  if (sourceLayer === targetLayer) {
+    // ── Single-layer L-route ─────────────────────────────────────────────────
+    // Horizontal segment
+    if (Math.abs(x1 - x2) > 0.001) {
+      segments.push({
+        trace: {
+          id: nextTraceId(),
+          startX: x1, startY: y1,
+          endX: x2,   endY: y1,
+          width, netId, layer: sourceLayer,
+        },
+      });
+    }
+    // Vertical segment
+    if (Math.abs(y1 - y2) > 0.001) {
+      segments.push({
+        trace: {
+          id: nextTraceId(),
+          startX: x2, startY: y1,
+          endX: x2,   endY: y2,
+          width, netId, layer: sourceLayer,
+        },
+      });
+    }
+  } else {
+    // ── Cross-layer route: place via at bend point ───────────────────────────
+    const bendX = x2;
+    const bendY = y1;
+
+    // Horizontal segment on source layer
+    if (Math.abs(x1 - bendX) > 0.001) {
+      segments.push({
+        trace: {
+          id: nextTraceId(),
+          startX: x1,    startY: y1,
+          endX: bendX, endY: y1,
+          width, netId, layer: sourceLayer,
+        },
+      });
+    }
+
+    // Via at bend
+    const via = selectViaForTransition(
+      bendX, bendY,
+      sourceLayer, targetLayer,
+      netId, stackup, netClass
+    );
+    vias.push(via);
+
+    // Vertical segment on target layer
+    if (Math.abs(bendY - y2) > 0.001) {
+      segments.push({
+        trace: {
+          id: nextTraceId(),
+          startX: bendX, startY: bendY,
+          endX: bendX,   endY: y2,
+          width, netId, layer: targetLayer,
+        },
+      });
     }
   }
-  return (wLow + wHigh) / 2;
+
+  const totalLengthMm = segments.reduce((sum, s) => {
+    const dx = s.trace.endX - s.trace.startX;
+    const dy = s.trace.endY - s.trace.startY;
+    return sum + Math.sqrt(dx * dx + dy * dy);
+  }, 0);
+
+  return { segments, vias, totalLengthMm };
 }
+
+// ── Controlled-Impedance Route ─────────────────────────────────────────────────
 
 /**
- * Compute propagation delay for a microstrip trace.
+ * Routes a controlled-impedance trace on a specific layer.
+ * Automatically solves the trace width to achieve `targetImpedanceOhm`
+ * using the IPC-2141A microstrip formula and the stackup dielectric parameters.
  *
- * t_pd = (1/c) * sqrt(0.475 * er + 0.67)   [ns/m]
- * c = 3e8 m/s
- *
- * @param er  Effective dielectric constant
- * @returns   Propagation delay in ps/mm
+ * @param x1, y1               Start coordinate
+ * @param x2, y2               End coordinate
+ * @param netId                Net identifier
+ * @param layer                Target copper layer
+ * @param targetImpedanceOhm   Desired impedance (e.g. 50, 90, 100)
+ * @param stackup              Active board stackup
  */
-export function propagationDelay(er: number): number {
-  const c = 3e11;  // mm/s
-  const erEff = 0.475 * er + 0.67;
-  return (1 / c) * Math.sqrt(erEff) * 1e12;  // ps/mm
+export function routeControlledImpedance(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  netId: string,
+  layer: LayerId,
+  targetImpedanceOhm: number,
+  stackup: PCBStackup
+): RouteResult {
+  // Find the stackup layer spec to get dielectric parameters
+  const layerIdx  = stackup.layers.findIndex((l) => l.layerId === layer);
+  const spec      = stackup.layers[layerIdx];
+  const nextSpec  = stackup.layers[layerIdx + 1]; // dielectric below trace
+  const dielectric = nextSpec ?? spec;
+
+  const er     = dielectric.dielectricConstant;
+  const h      = dielectric.dielectricThicknessMm;
+  const tCu    = spec.copperThicknessMicron / 1000; // µm → mm
+
+  const width = solveTraceWidthForImpedance(targetImpedanceOhm, er, h, tCu);
+
+  return routeSegment(x1, y1, x2, y2, netId, layer, layer, stackup, width);
 }
 
-// ─── Manhattan Router ─────────────────────────────────────────────────────────
+// ── Stackup Layer Accessor (convenience re-export) ────────────────────────────
 
-export interface RouteRequest {
-  id: string;
-  startX: number;
-  startY: number;
-  endX: number;
-  endY: number;
-  netId: string;
-  width: number;
+export function getLayerOrder(preset: StackupPreset): LayerId[] {
+  return STACKUP_LAYERS[preset];
 }
 
-/**
- * Simple L-shaped Manhattan router.
- * Routes first horizontally then vertically (can be toggled).
- *
- * Returns one or two trace segments.
- */
-export function routeManhattan(req: RouteRequest): PCBTrace[] {
-  const { id, startX, startY, endX, endY, netId, width } = req;
-
-  if (startX === endX || startY === endY) {
-    // Already aligned — single straight segment
-    return [{
-      id,
-      startX, startY,
-      endX, endY,
-      width,
-      netId,
-    }];
-  }
-
-  // Two-segment L-route: horizontal then vertical
-  const corner = { x: endX, y: startY };
-  return [
-    { id: `${id}-h`, startX, startY, endX: corner.x, endY: corner.y, width, netId },
-    { id: `${id}-v`, startX: corner.x, startY: corner.y, endX, endY, width, netId },
-  ];
-}
-
-/**
- * Auto-route a set of ratsnest connections using Manhattan routing.
- * Returns an array of new traces to commit.
- */
-export function autoRoute(
-  ratsnest: { id: string; startX: number; startY: number; endX: number; endY: number; netId: string }[],
-  traceWidth = 0.25,
-): PCBTrace[] {
-  return ratsnest.flatMap((rn, i) =>
-    routeManhattan({
-      id: `auto-${i}`,
-      startX: rn.startX,
-      startY: rn.startY,
-      endX: rn.endX,
-      endY: rn.endY,
-      netId: rn.netId,
-      width: traceWidth,
-    })
-  );
+export function getStackupForPreset(preset: StackupPreset): PCBStackup {
+  return getDefaultStackup(preset);
 }

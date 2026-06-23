@@ -1,295 +1,283 @@
-/**
- * PCBCanvas — Multi-layer copper workspace
- *
- * Renders:
- *  • Copper traces (TraceRenderer)
- *  • Placed component footprints (ComponentRenderer)
- *  • Ratsnest airwires (RatsnestLayer)
- *
- * Handles pan (drag), zoom (wheel), and tool interactions.
- * Uses SpatialIndex for viewport-culled rendering at 60 FPS.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// PCBCanvas
+//
+// Multi-layer copper workspace.  Renders components, traces, ratsnest, and
+// now vias.  Supports pan/zoom, component/trace/via selection, and optional
+// via placement mode.
+// ─────────────────────────────────────────────────────────────────────────────
 
-import React, { useCallback, useRef, useState, useEffect } from 'react';
-import type { PCBBoard } from '../../types/pcb';
-import ComponentRenderer from './ComponentRenderer';
-import TraceRenderer from './TraceRenderer';
-import RatsnestLayer from './RatsnestLayer';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
+import { PCBBoard, PCBVia, LayerId, ViaType } from '../../types/pcb';
+import { ComponentRenderer } from './ComponentRenderer';
+import { TraceRenderer } from './TraceRenderer';
+import { RatsnestLayer } from './RatsnestLayer';
+import { ViaRenderer } from './ViaRenderer';
+import { createVia, getDefaultStackup } from '../../lib/viaManager';
 import { useTransactionStore } from '../../lib/core/transaction';
-import { SpatialIndex } from '../../lib/core/spatial';
-
-interface LayerVisibility {
-  copper: boolean;
-  ratsnest: boolean;
-  silkscreen: boolean;
-  courtyard: boolean;
-}
 
 interface PCBCanvasProps {
   board: PCBBoard;
-  activeTool: string;
-  layerVisibility: LayerVisibility;
-  zoom: number;
-  onCommit: (board: PCBBoard) => void;
-  onStatusMessage: (msg: string) => void;
+  selectedComponentId: string | null;
+  selectedTraceId: string | null;
+  selectedViaId: string | null;
+  onSelectComponent: (id: string | null) => void;
+  onSelectTrace: (id: string | null) => void;
+  onSelectVia: (id: string | null) => void;
+  /** When set, clicking the canvas places a via of this type */
+  viaPlacementMode?: ViaType | null;
+  viaPlacementFrom?: LayerId;
+  viaPlacementTo?: LayerId;
+  viaPlacementNet?: string;
 }
 
-interface Transform {
-  x: number;
-  y: number;
-  scale: number;
-}
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 20;
+const ZOOM_SPEED = 0.0012;
 
-const GRID_SIZE = 10; // canvas units per grid cell
-
-const PCBCanvas: React.FC<PCBCanvasProps> = ({
+export const PCBCanvas: React.FC<PCBCanvasProps> = ({
   board,
-  activeTool,
-  layerVisibility,
-  zoom,
-  onCommit,
-  onStatusMessage,
+  selectedComponentId,
+  selectedTraceId,
+  selectedViaId,
+  onSelectComponent,
+  onSelectTrace,
+  onSelectVia,
+  viaPlacementMode,
+  viaPlacementFrom = 'F.Cu',
+  viaPlacementTo   = 'B.Cu',
+  viaPlacementNet  = 'gnd',
 }) => {
-  const svgRef = useRef<SVGSVGElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [transform, setTransform] = useState<Transform>({ x: 0, y: 0, scale: 1 });
+  const svgRef  = useRef<SVGSVGElement>(null);
+  const [zoom,  setZoom]  = useState(1.0);
+  const [panX,  setPanX]  = useState(0);
+  const [panY,  setPanY]  = useState(0);
   const [isPanning, setIsPanning] = useState(false);
-  const panStart = useRef<{ mx: number; my: number; tx: number; ty: number } | null>(null);
-  const [size, setSize] = useState({ w: 800, h: 600 });
-  const setSelectedComponentId = useTransactionStore(s => s.setSelectedComponentId);
-  const setSelectedTraceId = useTransactionStore(s => s.setSelectedTraceId);
-  const selectedComponentId = useTransactionStore(s => s.selectedComponentId);
+  const lastPan = useRef<{ x: number; y: number } | null>(null);
 
-  // Sync external zoom prop → transform
-  useEffect(() => {
-    setTransform(prev => ({ ...prev, scale: zoom }));
-  }, [zoom]);
+  // Ghost via cursor position
+  const [ghostPos, setGhostPos] = useState<{ x: number; y: number } | null>(null);
 
-  // Resize observer
-  useEffect(() => {
-    const obs = new ResizeObserver(entries => {
-      const e = entries[0];
-      if (e) setSize({ w: e.contentRect.width, h: e.contentRect.height });
-    });
-    if (containerRef.current) obs.observe(containerRef.current);
-    return () => obs.disconnect();
+  const { addVia } = useTransactionStore();
+
+  // ── Pan / zoom handlers ────────────────────────────────────────────────────
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    const delta = -e.deltaY * ZOOM_SPEED;
+    setZoom((z) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z * (1 + delta))));
   }, []);
 
-  // Build spatial index for viewport culling
-  const visibleComponentIds = React.useMemo(() => {
-    const index = new SpatialIndex<string>();
-    board.components.forEach(c => {
-      index.insert(c.id, c.x - 25, c.y - 25, c.x + 25, c.y + 25);
-    });
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.button === 1 || (e.button === 0 && e.altKey)) {
+        setIsPanning(true);
+        lastPan.current = { x: e.clientX, y: e.clientY };
+        e.preventDefault();
+      }
+    },
+    []
+  );
 
-    const { x, y, scale } = transform;
-    const vpLeft   = (-x) / scale;
-    const vpTop    = (-y) / scale;
-    const vpRight  = (size.w - x) / scale;
-    const vpBottom = (size.h - y) / scale;
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      if (isPanning && lastPan.current) {
+        const dx = e.clientX - lastPan.current.x;
+        const dy = e.clientY - lastPan.current.y;
+        setPanX((p) => p + dx);
+        setPanY((p) => p + dy);
+        lastPan.current = { x: e.clientX, y: e.clientY };
+      }
 
-    const visibleSet = new Set<string>();
-    index.query({ minX: vpLeft, minY: vpTop, maxX: vpRight, maxY: vpBottom }, visibleSet);
-    return visibleSet;
-  }, [board.components, transform, size]);
-
-  const visibleTraceIds = React.useMemo(() => {
-    const index = new SpatialIndex<string>();
-    board.traces.forEach(t => {
-      index.insert(
-        t.id,
-        Math.min(t.startX, t.endX),
-        Math.min(t.startY, t.endY),
-        Math.max(t.startX, t.endX),
-        Math.max(t.startY, t.endY),
-      );
-    });
-
-    const { x, y, scale } = transform;
-    const vpLeft   = (-x) / scale;
-    const vpTop    = (-y) / scale;
-    const vpRight  = (size.w - x) / scale;
-    const vpBottom = (size.h - y) / scale;
-
-    const visibleSet = new Set<string>();
-    index.query({ minX: vpLeft, minY: vpTop, maxX: vpRight, maxY: vpBottom }, visibleSet);
-    return visibleSet;
-  }, [board.traces, transform, size]);
-
-  // ── Pan handlers ──
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (activeTool === 'select' || activeTool === 'move') return;
-    if (e.button !== 1 && activeTool !== 'move') {
-      // Middle mouse or explicit move tool
-    }
-    if (e.button === 1 || activeTool === 'move') {
-      setIsPanning(true);
-      panStart.current = { mx: e.clientX, my: e.clientY, tx: transform.x, ty: transform.y };
-      e.preventDefault();
-    }
-  }, [activeTool, transform]);
-
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!isPanning || !panStart.current) return;
-    const dx = e.clientX - panStart.current.mx;
-    const dy = e.clientY - panStart.current.my;
-    setTransform(prev => ({
-      ...prev,
-      x: panStart.current!.tx + dx,
-      y: panStart.current!.ty + dy,
-    }));
-  }, [isPanning]);
+      // Update ghost via position
+      if (viaPlacementMode && svgRef.current) {
+        const rect = svgRef.current.getBoundingClientRect();
+        const sx = e.clientX - rect.left;
+        const sy = e.clientY - rect.top;
+        const cx = (sx - panX) / zoom;
+        const cy = (sy - panY) / zoom;
+        setGhostPos({ x: cx, y: cy });
+      }
+    },
+    [isPanning, viaPlacementMode, zoom, panX, panY]
+  );
 
   const handleMouseUp = useCallback(() => {
     setIsPanning(false);
-    panStart.current = null;
+    lastPan.current = null;
   }, []);
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.1 : 0.9;
-    const rect = svgRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
-    setTransform(prev => {
-      const newScale = Math.max(0.1, Math.min(10, prev.scale * factor));
-      const dx = cx - (cx - prev.x) * (newScale / prev.scale);
-      const dy = cy - (cy - prev.y) * (newScale / prev.scale);
-      return { x: dx, y: dy, scale: newScale };
-    });
+  const handleMouseLeave = useCallback(() => {
+    setIsPanning(false);
+    lastPan.current = null;
+    setGhostPos(null);
   }, []);
 
-  const handleComponentClick = useCallback((id: string) => {
-    if (activeTool === 'select') {
-      setSelectedComponentId(id);
-      const comp = board.components.find(c => c.id === id);
-      if (comp) onStatusMessage(`Selected: ${comp.name} (${comp.type})`);
-    } else if (activeTool === 'delete') {
-      const newBoard = {
-        ...board,
-        components: board.components.filter(c => c.id !== id),
-      };
-      onCommit(newBoard);
-      onStatusMessage(`Deleted component ${id}`);
-    }
-  }, [activeTool, board, onCommit, onStatusMessage, setSelectedComponentId]);
+  // ── Canvas click: deselect or place via ───────────────────────────────────
+  const handleCanvasClick = useCallback(
+    (e: React.MouseEvent<SVGSVGElement>) => {
+      if (isPanning) return;
 
-  const handleTraceClick = useCallback((id: string) => {
-    if (activeTool === 'select') {
-      setSelectedTraceId(id);
-      const trace = board.traces.find(t => t.id === id);
-      if (trace) onStatusMessage(`Trace: ${trace.netId} · ${trace.width}mm`);
-    } else if (activeTool === 'delete') {
-      const newBoard = {
-        ...board,
-        traces: board.traces.filter(t => t.id !== id),
-      };
-      onCommit(newBoard);
-      onStatusMessage(`Deleted trace ${id}`);
-    }
-  }, [activeTool, board, onCommit, onStatusMessage, setSelectedTraceId]);
-
-  // Cursor style per tool
-  const cursorStyle = {
-    select: 'cursor-default',
-    move: isPanning ? 'cursor-grabbing' : 'cursor-grab',
-    route: 'cursor-crosshair',
-    place: 'cursor-crosshair',
-    measure: 'cursor-crosshair',
-    delete: 'cursor-not-allowed',
-  }[activeTool] ?? 'cursor-default';
-
-  // Grid dot pattern
-  const gridDots = React.useMemo(() => {
-    const { x, y, scale } = transform;
-    const step = GRID_SIZE * scale;
-    if (step < 6) return null; // Too dense to render
-
-    const startX = Math.floor(-x / step) * step + x;
-    const startY = Math.floor(-y / step) * step + y;
-    const cols = Math.ceil(size.w / step) + 1;
-    const rows = Math.ceil(size.h / step) + 1;
-
-    const dots: React.ReactElement[] = [];
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        dots.push(
-          <circle
-            key={`${r}-${c}`}
-            cx={startX + c * step}
-            cy={startY + r * step}
-            r={0.8}
-            fill="#1e293b"
-          />
+      if (viaPlacementMode && svgRef.current) {
+        const rect = svgRef.current.getBoundingClientRect();
+        const sx = e.clientX - rect.left;
+        const sy = e.clientY - rect.top;
+        const cx = (sx - panX) / zoom;
+        const cy = (sy - panY) / zoom;
+        const stackup = board.stackup ?? getDefaultStackup('4L');
+        const via: PCBVia = createVia(
+          cx, cy,
+          viaPlacementFrom, viaPlacementTo,
+          viaPlacementNet,
+          stackup
         );
+        addVia(via);
+        return;
       }
-    }
-    return dots;
-  }, [transform, size]);
 
-  const { x: tx, y: ty, scale: ts } = transform;
-  const visibleComponents = board.components.filter(c => visibleComponentIds.has(c.id));
-  const visibleTraces = board.traces.filter(t => visibleTraceIds.has(t.id));
+      // Deselect
+      onSelectComponent(null);
+      onSelectTrace(null);
+      onSelectVia(null);
+    },
+    [
+      isPanning, viaPlacementMode,
+      viaPlacementFrom, viaPlacementTo, viaPlacementNet,
+      board.stackup, zoom, panX, panY,
+      addVia, onSelectComponent, onSelectTrace, onSelectVia,
+    ]
+  );
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'f' || e.key === 'F') {
+        // Fit to view
+        setZoom(1.0);
+        setPanX(0);
+        setPanY(0);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const vias   = board.vias ?? [];
+  const stackup = board.stackup ?? getDefaultStackup('4L');
 
   return (
-    <div
-      ref={containerRef}
-      className={`w-full h-full bg-[#0a0f1a] relative overflow-hidden ${cursorStyle}`}
-    >
+    <div className="relative w-full h-full bg-[#0b0b10] overflow-hidden select-none">
+      {/* Grid background */}
+      <svg
+        className="absolute inset-0 w-full h-full pointer-events-none"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <defs>
+          <pattern
+            id="pcb-grid"
+            x={panX % (20 * zoom)}
+            y={panY % (20 * zoom)}
+            width={20 * zoom}
+            height={20 * zoom}
+            patternUnits="userSpaceOnUse"
+          >
+            <circle cx={0} cy={0} r={0.6} fill="#ffffff10" />
+          </pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#pcb-grid)" />
+      </svg>
+
+      {/* Main canvas */}
       <svg
         ref={svgRef}
-        width={size.w}
-        height={size.h}
+        className={`absolute inset-0 w-full h-full ${
+          viaPlacementMode ? 'cursor-crosshair' : isPanning ? 'cursor-grabbing' : 'cursor-default'
+        }`}
+        onWheel={handleWheel}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        onWheel={handleWheel}
-        className="absolute inset-0"
-        aria-label="PCB layout canvas"
+        onMouseLeave={handleMouseLeave}
+        onClick={handleCanvasClick}
       >
-        {/* Grid */}
-        {gridDots}
+        {/* Ratsnest (lowest layer) */}
+        <RatsnestLayer
+          ratnest={board.ratnest}
+          zoom={zoom}
+          panX={panX}
+          panY={panY}
+        />
 
-        {/* Board content */}
-        <g transform={`translate(${tx},${ty}) scale(${ts})`}>
-          {/* Ratsnest */}
-          {layerVisibility.ratsnest && (
-            <RatsnestLayer ratnest={board.ratnest} />
-          )}
+        {/* Traces */}
+        <TraceRenderer
+          traces={board.traces}
+          zoom={zoom}
+          panX={panX}
+          panY={panY}
+          selectedTraceId={selectedTraceId}
+          onSelectTrace={onSelectTrace}
+        />
 
-          {/* Copper traces */}
-          {layerVisibility.copper && (
-            <TraceRenderer
-              traces={visibleTraces}
-              onTraceClick={handleTraceClick}
-            />
-          )}
+        {/* Vias */}
+        <ViaRenderer
+          vias={vias}
+          zoom={zoom}
+          panX={panX}
+          panY={panY}
+          selectedViaId={selectedViaId}
+          onSelectVia={onSelectVia}
+        />
 
-          {/* Component footprints */}
-          <ComponentRenderer
-            components={visibleComponents}
-            selectedId={selectedComponentId}
-            showSilkscreen={layerVisibility.silkscreen}
-            showCourtyard={layerVisibility.courtyard}
-            onComponentClick={handleComponentClick}
+        {/* Components (top layer) */}
+        <ComponentRenderer
+          components={board.components}
+          zoom={zoom}
+          panX={panX}
+          panY={panY}
+          selectedComponentId={selectedComponentId}
+          onSelectComponent={onSelectComponent}
+        />
+
+        {/* Ghost via cursor */}
+        {viaPlacementMode && ghostPos && (
+          <circle
+            cx={ghostPos.x * zoom + panX}
+            cy={ghostPos.y * zoom + panY}
+            r={8}
+            fill="none"
+            stroke={
+              viaPlacementMode === 'through' ? '#f59e0b'
+              : viaPlacementMode === 'blind'  ? '#38bdf8'
+              : viaPlacementMode === 'buried' ? '#a78bfa'
+              : '#34d399'
+            }
+            strokeWidth={1.5}
+            strokeDasharray="4 2"
+            pointerEvents="none"
           />
-        </g>
-
-        {/* Layer badge */}
-        <text x={8} y={size.h - 8} fontSize={10} fill="#1e293b" fontFamily="monospace">
-          PCB · F.Cu · {Math.round(ts * 100)}%
-        </text>
+        )}
       </svg>
 
-      {/* Viewport info overlay */}
-      <div className="
-        absolute top-2 right-2 text-[9px] font-mono text-slate-700
-        pointer-events-none
-      ">
-        {visibleComponents.length}/{board.components.length} comps ·{' '}
-        {visibleTraces.length}/{board.traces.length} traces
+      {/* Via placement mode banner */}
+      {viaPlacementMode && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 pointer-events-none">
+          <div className="bg-[#0f0f18]/90 border border-white/20 rounded-full px-4 py-1.5
+                          text-xs font-semibold text-white/80 backdrop-blur-sm shadow-lg">
+            Click to place{' '}
+            <span className={
+              viaPlacementMode === 'through' ? 'text-amber-400'
+              : viaPlacementMode === 'blind'  ? 'text-sky-400'
+              : viaPlacementMode === 'buried' ? 'text-violet-400'
+              : 'text-emerald-400'
+            }>
+              {viaPlacementMode}
+            </span>{' '}
+            via &nbsp;·&nbsp; <kbd className="opacity-50">Esc</kbd> to cancel
+          </div>
+        </div>
+      )}
+
+      {/* Zoom indicator */}
+      <div className="absolute bottom-3 right-3 text-[10px] text-white/25 font-mono pointer-events-none">
+        {Math.round(zoom * 100)}%
       </div>
     </div>
   );

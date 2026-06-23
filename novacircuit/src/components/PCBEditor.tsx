@@ -1,595 +1,587 @@
-/**
- * PCBEditor — Grand Workspace
- *
- * Layout:
- *  ┌─────────────────────────────────────────────────────────────────┐
- *  │  Topbar (logo · net stats · actions)                            │
- *  ├──────────┬──────────────────────────────────────────┬───────────┤
- *  │          │                                          │           │
- *  │ Sidebar  │  Split Canvas                            │ PDN Panel │
- *  │ (tools)  │  SchematicCanvas | PCBCanvas             │ (slide-in)│
- *  │          │                                          │           │
- *  ├──────────┴──────────────────────────────────────────┴───────────┤
- *  │  Status bar · AI chat toggle · DRC summary                      │
- *  └─────────────────────────────────────────────────────────────────┘
- *
- * New: PDN Analyzer panel toggled via toolbar button (Activity icon).
- * Renders as a right-side drawer (380 px wide on desktop, full-width modal on mobile).
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// PCBEditor — Grand Workspace
+//
+// Primary layout container housing:
+//   • Collapsible sidebar
+//   • AI Chat console panel
+//   • Split-view: SchematicCanvas + PCBCanvas
+//   • IPC Stackup Drawer (slide-up) with via cross-sections
+//   • Via Toolbar (placement mode)
+//   • Via DRC Panel
+//   • Via Inspector (for selected via)
+//   • PDN Analyzer panel
+// ─────────────────────────────────────────────────────────────────────────────
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+} from 'react';
 import {
-  Activity,
-  AlertTriangle,
-  BookOpen,
-  Check,
+  Layers,
+  Cpu,
+  GitBranch,
+  ZapOff,
+  MessageSquare,
+  Settings,
   ChevronLeft,
   ChevronRight,
-  Cpu,
-  Download,
-  FileText,
-  Grid,
-  HelpCircle,
+  DownloadCloud,
+  AlertCircle,
+  CheckCircle,
   Info,
-  Layers,
-  MessageSquare,
-  Minus,
-  Move,
-  MousePointer,
-  Package,
-  Plus,
-  Radio,
-  RotateCcw,
-  RotateCw,
-  Ruler,
-  Settings,
-  Share2,
-  Trash2,
-  Wand2,
+  HelpCircle,
   Zap,
+  Circle,
+  Shield,
 } from 'lucide-react';
+
 import { useTransactionStore } from '../lib/core/transaction';
-import type { PCBBoard, PCBComponent, PCBTrace } from '../types/pcb';
-import PCBCanvas from './PCB/PCBCanvas';
-import SchematicCanvas from './PCB/SchematicCanvas';
-import AboutDialog from './AboutDialog';
-import HelpDialog from './HelpDialog';
-import OnboardingDialog from './OnboardingDialog';
-import PDNAnalyzer from './PDNAnalyzer';
+import { PCBBoard, ViaType, LayerId, PCBStackup } from '../types/pcb';
+import { getDefaultStackup } from '../lib/viaManager';
+import { exportBoard }     from '../lib/exporter';
 
-// ─── Tool Definitions ─────────────────────────────────────────────────────────
+import { PCBCanvas }        from './PCB/PCBCanvas';
+import { SchematicCanvas }  from './PCB/SchematicCanvas';
+import { StackupDrawer }    from './PCB/StackupDrawer';
+import { ViaInspector }     from './PCB/ViaInspector';
+import { ViaRenderer }      from './PCB/ViaRenderer';
+import { ViaDRCPanel }      from './ViaDRCPanel';
+import { ViaToolbar }       from './ViaToolbar';
+import { PDNAnalyzer }      from './PDNAnalyzer';
+import { AboutDialog }      from './AboutDialog';
+import { HelpDialog }       from './HelpDialog';
 
-type ToolId =
-  | 'select' | 'move' | 'route' | 'place' | 'measure'
-  | 'delete' | 'zoom-in' | 'zoom-out';
+// ── AI Chat ────────────────────────────────────────────────────────────────────
 
-interface Tool {
-  id: ToolId;
-  icon: React.ReactNode;
-  label: string;
-  shortcut: string;
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
 }
 
-const TOOLS: Tool[] = [
-  { id: 'select',   icon: <MousePointer size={16} />, label: 'Select',     shortcut: 'V' },
-  { id: 'move',     icon: <Move size={16} />,          label: 'Move',       shortcut: 'M' },
-  { id: 'route',    icon: <Share2 size={16} />,         label: 'Route Trace',shortcut: 'R' },
-  { id: 'place',    icon: <Package size={16} />,        label: 'Place Part', shortcut: 'P' },
-  { id: 'measure',  icon: <Ruler size={16} />,          label: 'Measure',    shortcut: 'D' },
-  { id: 'delete',   icon: <Trash2 size={16} />,         label: 'Delete',     shortcut: 'X' },
-];
+const ChatConsole: React.FC<{ board: PCBBoard }> = ({ board }) => {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput]       = useState('');
+  const [loading, setLoading]   = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
 
-// ─── Layer Visibility State ───────────────────────────────────────────────────
-
-interface LayerVisibility {
-  copper: boolean;
-  ratsnest: boolean;
-  silkscreen: boolean;
-  courtyard: boolean;
-}
-
-// ─── Component ───────────────────────────────────────────────────────────────
-
-const PCBEditor: React.FC = () => {
-  const history = useTransactionStore(s => s.history);
-  const currentIndex = useTransactionStore(s => s.currentIndex);
-  const commitTransaction = useTransactionStore(s => s.commitTransaction);
-  const undo = useTransactionStore(s => s.undo);
-  const redo = useTransactionStore(s => s.redo);
-  const selectedComponentId = useTransactionStore(s => s.selectedComponentId);
-  const selectedTraceId = useTransactionStore(s => s.selectedTraceId);
-  const setSelectedComponentId = useTransactionStore(s => s.setSelectedComponentId);
-  const experienceLevel = useTransactionStore(s => s.experienceLevel);
-
-  const board = history[currentIndex];
-
-  // ── UI State ──
-  const [activeTool, setActiveTool] = useState<ToolId>('select');
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [showSchematic, setShowSchematic] = useState(true);
-  const [showChat, setShowChat] = useState(false);
-  const [showAbout, setShowAbout] = useState(false);
-  const [showHelp, setShowHelp] = useState(false);
-  const [showOnboarding, setShowOnboarding] = useState(!experienceLevel);
-  const [showPDNAnalyzer, setShowPDNAnalyzer] = useState(false);
-  const [chatInput, setChatInput] = useState('');
-  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'ai'; text: string }[]>([
-    {
-      role: 'ai',
-      text: 'NovaCircuit AI Copilot ready. Ask me about your design — impedance targets, decoupling strategy, DRC violations, or routing topology.',
-    },
-  ]);
-  const [isChatLoading, setIsChatLoading] = useState(false);
-  const [layers, setLayers] = useState<LayerVisibility>({
-    copper: true,
-    ratsnest: true,
-    silkscreen: true,
-    courtyard: false,
-  });
-  const [zoom, setZoom] = useState(1.0);
-  const [statusMessage, setStatusMessage] = useState('Ready');
-
-  const chatEndRef = useRef<HTMLDivElement>(null);
-
-  // ── Keyboard Shortcuts ──
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      const key = e.key.toUpperCase();
-      if (e.ctrlKey || e.metaKey) {
-        if (key === 'Z') { e.preventDefault(); undo(); setStatusMessage('Undo'); }
-        if (key === 'Y') { e.preventDefault(); redo(); setStatusMessage('Redo'); }
-        if (key === 'S') { e.preventDefault(); setStatusMessage('Saved'); }
-        return;
-      }
-      const tool = TOOLS.find(t => t.shortcut === key);
-      if (tool) { setActiveTool(tool.id); setStatusMessage(`Tool: ${tool.label}`); }
-      if (key === 'ESCAPE') setSelectedComponentId(null);
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [undo, redo, setSelectedComponentId]);
-
-  // ── Chat scroll ──
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages]);
-
-  // ── Handlers ──
-  const handleUndo = useCallback(() => {
-    const prev = undo();
-    if (prev) setStatusMessage('Undo');
-  }, [undo]);
-
-  const handleRedo = useCallback(() => {
-    const next = redo();
-    if (next) setStatusMessage('Redo');
-  }, [redo]);
-
-  const handleDeleteSelected = useCallback(() => {
-    if (!selectedComponentId && !selectedTraceId) return;
-    const newBoard: PCBBoard = {
-      ...board,
-      components: selectedComponentId
-        ? board.components.filter(c => c.id !== selectedComponentId)
-        : board.components,
-      traces: selectedTraceId
-        ? board.traces.filter(t => t.id !== selectedTraceId)
-        : board.traces,
-    };
-    commitTransaction(newBoard);
-    setStatusMessage('Deleted');
-  }, [board, commitTransaction, selectedComponentId, selectedTraceId]);
-
-  const handleChatSend = useCallback(async () => {
-    const text = chatInput.trim();
-    if (!text || isChatLoading) return;
-    setChatInput('');
-    setChatMessages(prev => [...prev, { role: 'user', text }]);
-    setIsChatLoading(true);
+  const send = useCallback(async () => {
+    if (!input.trim() || loading) return;
+    const userMsg: ChatMessage = { role: 'user', content: input.trim() };
+    setMessages((m) => [...m, userMsg]);
+    setInput('');
+    setLoading(true);
     try {
-      const resp = await fetch('/api/chat', {
+      const res = await fetch('/api/copilot', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: text,
-          context: {
+          message: userMsg.content,
+          boardContext: {
             componentCount: board.components.length,
             traceCount: board.traces.length,
-            nets: [...new Set(board.traces.map(t => t.netId))].slice(0, 10),
+            viaCount: board.vias?.length ?? 0,
+            stackup: board.stackup?.preset ?? '4L',
           },
         }),
       });
-      if (!resp.ok) throw new Error('API error');
-      const data = await resp.json() as { reply: string };
-      setChatMessages(prev => [...prev, { role: 'ai', text: data.reply }]);
+      const data = await res.json();
+      setMessages((m) => [
+        ...m,
+        { role: 'assistant', content: data.response ?? 'No response.' },
+      ]);
     } catch {
-      setChatMessages(prev => [
-        ...prev,
-        { role: 'ai', text: 'AI Copilot is offline. Check GEMINI_API_KEY configuration.' },
+      setMessages((m) => [
+        ...m,
+        { role: 'assistant', content: 'AI Copilot unavailable. Check server and API key.' },
       ]);
     } finally {
-      setIsChatLoading(false);
+      setLoading(false);
     }
-  }, [chatInput, isChatLoading, board]);
+  }, [input, loading, board]);
 
-  const toggleLayer = useCallback((key: keyof LayerVisibility) => {
-    setLayers(prev => ({ ...prev, [key]: !prev[key] }));
-  }, []);
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
-  // DRC summary (lightweight)
-  const drcSummary = React.useMemo(() => {
-    const violations: string[] = [];
-    // Overlapping check (simplified)
-    if (board.ratnest.length > 0) {
-      violations.push(`${board.ratnest.length} unrouted`);
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
+        {messages.length === 0 && (
+          <p className="text-white/30 text-center py-8">
+            Ask the AI Copilot about your PCB design, via strategy, or impedance matching…
+          </p>
+        )}
+        {messages.map((m, i) => (
+          <div
+            key={i}
+            className={`rounded-lg px-3 py-2 max-w-[90%] ${
+              m.role === 'user'
+                ? 'ml-auto bg-amber-500/15 text-amber-100 border border-amber-500/20'
+                : 'bg-white/5 text-white/80 border border-white/8'
+            }`}
+          >
+            {m.content}
+          </div>
+        ))}
+        {loading && (
+          <div className="bg-white/5 text-white/40 rounded-lg px-3 py-2 text-xs border border-white/8 max-w-[80%]">
+            <span className="animate-pulse">Thinking…</span>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+      <div className="border-t border-white/8 p-2 flex gap-2">
+        <input
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && send()}
+          placeholder="Ask AI Copilot…"
+          className="flex-1 bg-white/5 rounded px-3 py-1.5 text-xs text-white
+                     placeholder-white/25 focus:outline-none focus:ring-1 focus:ring-amber-400/30
+                     border border-white/10"
+        />
+        <button
+          onClick={send}
+          disabled={loading || !input.trim()}
+          className="px-3 py-1.5 rounded bg-amber-500/20 text-amber-400 text-xs
+                     hover:bg-amber-500/30 transition-colors disabled:opacity-30"
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ── Sidebar Item ──────────────────────────────────────────────────────────────
+
+const SidebarItem: React.FC<{
+  icon: React.ReactNode;
+  label: string;
+  active?: boolean;
+  badge?: string | number;
+  badgeColor?: string;
+  onClick: () => void;
+}> = ({ icon, label, active, badge, badgeColor = 'bg-white/20', onClick }) => (
+  <button
+    onClick={onClick}
+    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-colors
+      ${active
+        ? 'bg-amber-500/15 text-amber-400 border border-amber-500/25'
+        : 'text-white/50 hover:text-white/80 hover:bg-white/5'
+      }`}
+  >
+    <span className="flex-shrink-0">{icon}</span>
+    <span className="flex-1 text-left font-medium">{label}</span>
+    {badge !== undefined && (
+      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${badgeColor} leading-none`}>
+        {badge}
+      </span>
+    )}
+  </button>
+);
+
+// ── Main PCBEditor ─────────────────────────────────────────────────────────────
+
+type ActivePanel =
+  | 'schematic'
+  | 'pcb'
+  | 'split'
+  | 'chat'
+  | 'via-drc'
+  | 'pdn';
+
+export const PCBEditor: React.FC = () => {
+  const store = useTransactionStore();
+  const board = store.currentBoard();
+  const vias  = board.vias ?? [];
+  const stackup = board.stackup ?? getDefaultStackup('4L');
+
+  // ── Layout state ────────────────────────────────────────────────────────────
+  const [sidebarOpen,    setSidebarOpen]   = useState(true);
+  const [activePanel,    setActivePanel]   = useState<ActivePanel>('split');
+  const [stackupOpen,    setStackupOpen]   = useState(false);
+  const [showAbout,      setShowAbout]     = useState(false);
+  const [showHelp,       setShowHelp]      = useState(false);
+
+  // ── Via placement mode ──────────────────────────────────────────────────────
+  const [viaPlacement, setViaPlacement] = useState<{
+    active: boolean;
+    viaType: ViaType;
+    fromLayer: LayerId;
+    toLayer: LayerId;
+    netId: string;
+  }>({
+    active:    false,
+    viaType:   'through',
+    fromLayer: 'F.Cu',
+    toLayer:   'B.Cu',
+    netId:     'gnd',
+  });
+  const [showViaToolbar, setShowViaToolbar] = useState(false);
+
+  // ── Selection ───────────────────────────────────────────────────────────────
+  const selectedVia = vias.find((v) => v.id === store.selectedViaId) ?? null;
+
+  // ── DRC ─────────────────────────────────────────────────────────────────────
+  const [drcRunning, setDRCRunning] = useState(false);
+
+  const runDRC = useCallback(() => {
+    setDRCRunning(true);
+    // Yield to browser so the spinner renders before computation
+    requestAnimationFrame(() => {
+      store.runViasDRC();
+      setDRCRunning(false);
+    });
+  }, [store]);
+
+  // ── Export ──────────────────────────────────────────────────────────────────
+  const handleExport = useCallback(async () => {
+    try {
+      await exportBoard(board);
+    } catch (e) {
+      console.error('Export failed', e);
     }
-    return violations;
   }, [board]);
 
-  // ── Render ──
+  // ── Keyboard shortcuts ───────────────────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if (e.key === 'Escape') {
+        setViaPlacement((p) => ({ ...p, active: false }));
+        store.setSelectedVia(null);
+        return;
+      }
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === 'z') { store.undo(); e.preventDefault(); }
+        if (e.key === 'y') { store.redo(); e.preventDefault(); }
+        if (e.key === 's') { handleExport(); e.preventDefault(); }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [store, handleExport]);
+
+  // ── Via placement activate/deactivate ─────────────────────────────────────
+  const activateViaPlacement = useCallback(
+    (params: { viaType: ViaType; fromLayer: LayerId; toLayer: LayerId; netId: string }) => {
+      setViaPlacement({ active: true, ...params });
+    },
+    []
+  );
+
+  const deactivateViaPlacement = useCallback(() => {
+    setViaPlacement((p) => ({ ...p, active: false }));
+  }, []);
+
+  // ── DRC badge ─────────────────────────────────────────────────────────────
+  const drcBadge = store.viaDRCResult
+    ? store.viaDRCResult.errorCount > 0
+      ? { label: store.viaDRCResult.errorCount, color: 'bg-red-500/30 text-red-400' }
+      : store.viaDRCResult.warningCount > 0
+      ? { label: store.viaDRCResult.warningCount, color: 'bg-amber-500/30 text-amber-400' }
+      : { label: '✓', color: 'bg-emerald-500/30 text-emerald-400' }
+    : undefined;
+
   return (
-    <div className="flex flex-col h-screen w-screen bg-[#0b0b10] text-gray-200 overflow-hidden">
-
-      {/* ══════════ TOPBAR ══════════ */}
-      <div className="
-        flex items-center justify-between px-3 py-2
-        border-b border-slate-800 bg-slate-900/80 backdrop-blur-md
-        flex-shrink-0 z-30
-      ">
-        {/* Left: Logo + project info */}
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-400 to-blue-500
-              flex items-center justify-center shadow-lg">
-              <Cpu size={14} className="text-white" />
-            </div>
-            <span className="text-sm font-bold text-slate-100 tracking-tight hidden sm:inline">
-              NovaCircuit
-            </span>
+    <div className="flex h-screen bg-[#0b0b10] text-white overflow-hidden">
+      {/* ── Sidebar ──────────────────────────────────────────────────────────── */}
+      <div
+        className={`flex flex-col border-r border-white/8 bg-[#0f0f18] transition-all duration-200 flex-shrink-0 ${
+          sidebarOpen ? 'w-52' : 'w-12'
+        }`}
+      >
+        {/* Logo */}
+        <div className="flex items-center gap-2 px-3 py-3 border-b border-white/8">
+          <div className="w-6 h-6 rounded bg-amber-500/20 flex items-center justify-center flex-shrink-0">
+            <Cpu size={13} className="text-amber-400" />
           </div>
-          <div className="h-4 w-px bg-slate-700" />
-          <span className="text-xs text-slate-500 font-mono hidden md:inline">
-            Untitled Board · {board.components.length} components · {board.traces.length} traces
-          </span>
-        </div>
-
-        {/* Center: Undo/Redo + View toggles */}
-        <div className="flex items-center gap-1">
-          <button onClick={handleUndo}
-            className="p-1.5 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
-            title="Undo (Ctrl+Z)">
-            <RotateCcw size={14} />
-          </button>
-          <button onClick={handleRedo}
-            className="p-1.5 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
-            title="Redo (Ctrl+Y)">
-            <RotateCw size={14} />
-          </button>
-
-          <div className="w-px h-4 bg-slate-700 mx-1" />
-
-          <button
-            onClick={() => setShowSchematic(v => !v)}
-            className={`
-              flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors
-              ${showSchematic ? 'bg-slate-700 text-slate-200' : 'text-slate-500 hover:text-slate-300'}
-            `}
-            title="Toggle schematic view"
-          >
-            <Grid size={12} />
-            <span className="hidden lg:inline">Schematic</span>
-          </button>
-
-          {/* PDN Analyzer toggle */}
-          <button
-            onClick={() => setShowPDNAnalyzer(v => !v)}
-            className={`
-              flex items-center gap-1.5 px-2.5 py-1 rounded text-xs transition-all duration-150
-              ${showPDNAnalyzer
-                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-              }
-            `}
-            title="Power Distribution Network Analyzer"
-          >
-            <Activity size={13} className={showPDNAnalyzer ? 'text-cyan-400' : ''} />
-            <span className="hidden lg:inline font-medium">PDN Analyzer</span>
-          </button>
-        </div>
-
-        {/* Right: Actions */}
-        <div className="flex items-center gap-1">
-          {drcSummary.length > 0 && (
-            <div className="flex items-center gap-1 px-2 py-1 rounded bg-red-900/20
-              border border-red-800/40 text-red-400 text-xs mr-1">
-              <AlertTriangle size={11} />
-              <span className="hidden sm:inline">{drcSummary.join(' · ')}</span>
-            </div>
+          {sidebarOpen && (
+            <span className="text-xs font-bold text-white/80 truncate">NovaCircuit</span>
           )}
           <button
-            onClick={() => setShowChat(v => !v)}
-            className={`
-              p-1.5 rounded transition-colors
-              ${showChat ? 'text-cyan-400 bg-cyan-500/10' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}
-            `}
-            title="AI Copilot"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            className="ml-auto text-white/30 hover:text-white/70 transition-colors"
           >
-            <MessageSquare size={14} />
-          </button>
-          <button onClick={() => setShowHelp(true)}
-            className="p-1.5 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
-            title="Help">
-            <HelpCircle size={14} />
-          </button>
-          <button onClick={() => setShowAbout(true)}
-            className="p-1.5 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
-            title="About">
-            <Info size={14} />
-          </button>
-          <button
-            className="
-              flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-semibold
-              bg-cyan-600 hover:bg-cyan-500 text-white transition-colors ml-1
-            "
-          >
-            <Download size={12} />
-            <span className="hidden sm:inline">Export</span>
+            {sidebarOpen ? <ChevronLeft size={13} /> : <ChevronRight size={13} />}
           </button>
         </div>
-      </div>
 
-      {/* ══════════ MAIN AREA ══════════ */}
-      <div className="flex flex-1 overflow-hidden">
+        {/* Nav items */}
+        <nav className="flex-1 p-2 space-y-0.5 overflow-y-auto">
+          {sidebarOpen ? (
+            <>
+              <p className="text-white/25 text-[9px] uppercase tracking-widest px-2 py-1.5">Views</p>
+              <SidebarItem icon={<Layers size={13} />} label="Split View"    active={activePanel === 'split'}  onClick={() => setActivePanel('split')}  />
+              <SidebarItem icon={<GitBranch size={13} />} label="Schematic"  active={activePanel === 'schematic'} onClick={() => setActivePanel('schematic')} />
+              <SidebarItem icon={<Cpu size={13} />}    label="PCB Layout"    active={activePanel === 'pcb'}    onClick={() => setActivePanel('pcb')}    />
+              <SidebarItem icon={<MessageSquare size={13} />} label="AI Copilot" active={activePanel === 'chat'} onClick={() => setActivePanel('chat')} />
 
-        {/* ── Sidebar ── */}
-        <div className={`
-          flex flex-col flex-shrink-0
-          bg-slate-900/60 border-r border-slate-800
-          transition-all duration-200
-          ${sidebarCollapsed ? 'w-12' : 'w-14'}
-        `}>
-          {/* Collapse toggle */}
-          <button
-            onClick={() => setSidebarCollapsed(v => !v)}
-            className="flex items-center justify-center h-8 text-slate-600
-              hover:text-slate-400 transition-colors border-b border-slate-800"
-          >
-            {sidebarCollapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
-          </button>
-
-          {/* Tools */}
-          <div className="flex flex-col gap-0.5 py-2 px-1">
-            {TOOLS.map(tool => (
-              <button
-                key={tool.id}
-                onClick={() => setActiveTool(tool.id)}
-                title={`${tool.label} (${tool.shortcut})`}
-                className={`
-                  flex flex-col items-center gap-0.5 p-2 rounded transition-all
-                  ${activeTool === tool.id
-                    ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'
-                    : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800'
-                  }
-                `}
-              >
-                {tool.icon}
-                {!sidebarCollapsed && (
-                  <span className="text-[8px] font-mono text-center leading-tight">
-                    {tool.shortcut}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-
-          {/* Divider */}
-          <div className="mx-2 my-1 border-t border-slate-800" />
-
-          {/* Layer toggles */}
-          <div className="flex flex-col gap-0.5 py-1 px-1">
-            {(Object.keys(layers) as (keyof LayerVisibility)[]).map(key => (
-              <button
-                key={key}
-                onClick={() => toggleLayer(key)}
-                title={`Toggle ${key} layer`}
-                className={`
-                  flex flex-col items-center gap-0.5 p-1.5 rounded text-[9px] transition-all
-                  ${layers[key]
-                    ? 'text-slate-300 bg-slate-800/60'
-                    : 'text-slate-600 hover:text-slate-500'
-                  }
-                `}
-              >
-                <Layers size={12} />
-                {!sidebarCollapsed && (
-                  <span className="font-mono capitalize text-center"
-                    style={{ fontSize: '7px' }}>
-                    {key.slice(0, 4)}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-
-          {/* Bottom: zoom */}
-          <div className="mt-auto flex flex-col gap-0.5 py-2 px-1 border-t border-slate-800">
-            <button
-              onClick={() => setZoom(z => Math.min(z + 0.25, 4))}
-              className="flex items-center justify-center p-1.5 rounded text-slate-500
-                hover:text-slate-300 hover:bg-slate-800 transition-colors"
-              title="Zoom in"
-            >
-              <Plus size={13} />
-            </button>
-            <span className="text-[8px] font-mono text-slate-600 text-center">
-              {Math.round(zoom * 100)}%
-            </span>
-            <button
-              onClick={() => setZoom(z => Math.max(z - 0.25, 0.25))}
-              className="flex items-center justify-center p-1.5 rounded text-slate-500
-                hover:text-slate-300 hover:bg-slate-800 transition-colors"
-              title="Zoom out"
-            >
-              <Minus size={13} />
-            </button>
-          </div>
-        </div>
-
-        {/* ── Canvas Area ── */}
-        <div className="flex flex-1 overflow-hidden relative">
-
-          {/* Split: Schematic + PCB */}
-          <div className={`flex flex-1 overflow-hidden ${showSchematic ? 'flex-row' : ''}`}>
-            {showSchematic && (
-              <div className="flex-1 overflow-hidden border-r border-slate-800/60 min-w-0">
-                <SchematicCanvas
-                  board={board}
-                  activeTool={activeTool}
-                  onCommit={commitTransaction}
-                />
-              </div>
-            )}
-            <div className={`${showSchematic ? 'flex-1' : 'flex-1'} overflow-hidden min-w-0`}>
-              <PCBCanvas
-                board={board}
-                activeTool={activeTool}
-                layerVisibility={layers}
-                zoom={zoom}
-                onCommit={commitTransaction}
-                onStatusMessage={setStatusMessage}
+              <p className="text-white/25 text-[9px] uppercase tracking-widest px-2 py-1.5 mt-2">Analysis</p>
+              <SidebarItem
+                icon={<Shield size={13} />}
+                label="Via DRC"
+                active={activePanel === 'via-drc'}
+                onClick={() => setActivePanel('via-drc')}
+                badge={drcBadge?.label}
+                badgeColor={drcBadge?.color}
               />
-            </div>
-          </div>
+              <SidebarItem icon={<ZapOff size={13} />} label="PDN Analyzer" active={activePanel === 'pdn'} onClick={() => setActivePanel('pdn')} />
 
-          {/* AI Chat panel (overlay) */}
-          {showChat && (
-            <div className="
-              absolute bottom-8 right-4 w-80 max-h-96
-              bg-slate-900 border border-slate-700 rounded-xl shadow-2xl
-              flex flex-col z-20 overflow-hidden
-            ">
-              <div className="flex items-center justify-between px-3 py-2
-                border-b border-slate-700 flex-shrink-0">
-                <div className="flex items-center gap-2">
-                  <Wand2 size={13} className="text-cyan-400" />
-                  <span className="text-xs font-semibold text-slate-200">AI Copilot</span>
-                </div>
-                <button onClick={() => setShowChat(false)}
-                  className="text-slate-500 hover:text-slate-300 transition-colors">
-                  ✕
-                </button>
-              </div>
-              <div className="flex-1 overflow-y-auto p-3 space-y-2 no-scrollbar">
-                {chatMessages.map((msg, i) => (
-                  <div key={i} className={`text-xs rounded-lg px-3 py-2 ${
-                    msg.role === 'user'
-                      ? 'bg-cyan-900/30 text-cyan-100 text-right ml-4'
-                      : 'bg-slate-800 text-slate-300 mr-4'
-                  }`}>
-                    {msg.text}
-                  </div>
-                ))}
-                {isChatLoading && (
-                  <div className="bg-slate-800 rounded-lg px-3 py-2 text-xs text-slate-500 mr-4
-                    animate-pulse">
-                    Thinking…
-                  </div>
-                )}
-                <div ref={chatEndRef} />
-              </div>
-              <div className="flex items-center gap-2 px-3 py-2 border-t border-slate-700 flex-shrink-0">
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleChatSend()}
-                  placeholder="Ask about your design…"
-                  className="
-                    flex-1 bg-slate-800 border border-slate-700 rounded px-2 py-1
-                    text-xs text-slate-200 placeholder-slate-600
-                    focus:outline-none focus:border-cyan-500
-                  "
-                />
+              <p className="text-white/25 text-[9px] uppercase tracking-widest px-2 py-1.5 mt-2">Tools</p>
+              <SidebarItem
+                icon={<Circle size={13} />}
+                label="Place Via"
+                active={showViaToolbar}
+                onClick={() => setShowViaToolbar(!showViaToolbar)}
+                badge={vias.length > 0 ? vias.length : undefined}
+                badgeColor="bg-white/15 text-white/50"
+              />
+              <SidebarItem icon={<Layers size={13} />} label="Stackup" onClick={() => setStackupOpen(true)} />
+              <SidebarItem icon={<DownloadCloud size={13} />} label="Export Gerber" onClick={handleExport} />
+
+              <p className="text-white/25 text-[9px] uppercase tracking-widest px-2 py-1.5 mt-2">Help</p>
+              <SidebarItem icon={<HelpCircle size={13} />} label="Shortcuts" onClick={() => setShowHelp(true)} />
+              <SidebarItem icon={<Info size={13} />}       label="About"     onClick={() => setShowAbout(true)} />
+            </>
+          ) : (
+            // Collapsed icon rail
+            <div className="flex flex-col items-center gap-1">
+              {[
+                { icon: <Layers size={14} />,       tip: 'Split',    action: () => setActivePanel('split')   },
+                { icon: <GitBranch size={14} />,    tip: 'Schem.',   action: () => setActivePanel('schematic') },
+                { icon: <Cpu size={14} />,          tip: 'PCB',      action: () => setActivePanel('pcb')     },
+                { icon: <MessageSquare size={14} />,tip: 'AI',       action: () => setActivePanel('chat')    },
+                { icon: <Shield size={14} />,       tip: 'Via DRC',  action: () => setActivePanel('via-drc') },
+                { icon: <ZapOff size={14} />,       tip: 'PDN',      action: () => setActivePanel('pdn')     },
+                { icon: <Circle size={14} />,       tip: 'Via',      action: () => setShowViaToolbar(!showViaToolbar) },
+                { icon: <Layers size={14} />,       tip: 'Stackup',  action: () => setStackupOpen(true)      },
+              ].map((item, i) => (
                 <button
-                  onClick={handleChatSend}
-                  disabled={isChatLoading || !chatInput.trim()}
-                  className="
-                    p-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-white
-                    disabled:opacity-40 disabled:cursor-not-allowed transition-colors
-                  "
+                  key={i}
+                  title={item.tip}
+                  onClick={item.action}
+                  className="w-8 h-8 flex items-center justify-center rounded text-white/40
+                             hover:text-white/80 hover:bg-white/8 transition-colors"
                 >
-                  <Zap size={12} />
+                  {item.icon}
                 </button>
-              </div>
+              ))}
             </div>
           )}
-        </div>
+        </nav>
 
-        {/* ── PDN Analyzer Panel ── */}
-        {showPDNAnalyzer && (
-          <div className="
-            flex-shrink-0 w-[400px] xl:w-[440px]
-            border-l border-slate-800 overflow-hidden
-            flex flex-col
-          ">
-            <PDNAnalyzer onClose={() => setShowPDNAnalyzer(false)} />
+        {/* Stackup / undo-redo footer */}
+        {sidebarOpen && (
+          <div className="p-2 border-t border-white/8 space-y-1">
+            <div className="flex gap-1">
+              <button
+                onClick={() => store.undo()}
+                className="flex-1 text-xs text-white/40 hover:text-white/70 py-1 rounded hover:bg-white/5"
+                title="Undo (Ctrl+Z)"
+              >
+                ↩ Undo
+              </button>
+              <button
+                onClick={() => store.redo()}
+                className="flex-1 text-xs text-white/40 hover:text-white/70 py-1 rounded hover:bg-white/5"
+                title="Redo (Ctrl+Y)"
+              >
+                Redo ↪
+              </button>
+            </div>
+            <div className="text-[9px] text-white/20 text-center font-mono">
+              {board.components.length}C · {board.traces.length}T · {vias.length}V
+            </div>
           </div>
         )}
       </div>
 
-      {/* ══════════ STATUS BAR ══════════ */}
-      <div className="
-        flex items-center justify-between px-3 py-1
-        border-t border-slate-800 bg-slate-900/60
-        flex-shrink-0 z-30
-      ">
-        <div className="flex items-center gap-3 text-[10px] font-mono text-slate-500">
-          <span className="flex items-center gap-1">
-            <Check size={10} className="text-emerald-500" />
-            {statusMessage}
-          </span>
-          <span>·</span>
-          <span>
-            {board.components.length} components
-          </span>
-          <span>·</span>
-          <span>
-            {board.traces.length} traces
-          </span>
-          {selectedComponentId && (
-            <>
-              <span>·</span>
-              <span className="text-cyan-400">
-                Selected: {selectedComponentId}
-              </span>
-            </>
+      {/* ── Main content area ──────────────────────────────────────────────── */}
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Top toolbar */}
+        <div className="h-9 flex items-center gap-2 px-3 border-b border-white/8 bg-[#0f0f18] flex-shrink-0">
+          {/* Stackup badge */}
+          <button
+            onClick={() => setStackupOpen(true)}
+            className="flex items-center gap-1.5 text-[10px] text-white/50 hover:text-white/80
+                       bg-white/5 border border-white/10 rounded px-2 py-0.5 transition-colors"
+          >
+            <Layers size={10} />
+            {stackup.preset} · {stackup.totalThicknessMm}mm
+          </button>
+
+          {/* Via placement active indicator */}
+          {viaPlacement.active && (
+            <div className="flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded
+                            bg-amber-500/15 border border-amber-500/30 text-amber-400">
+              <Circle size={9} className="animate-pulse" />
+              Placing {viaPlacement.viaType} via · {viaPlacement.fromLayer}→{viaPlacement.toLayer}
+              <button onClick={deactivateViaPlacement} className="ml-1 text-amber-400/60 hover:text-amber-400">×</button>
+            </div>
           )}
+
+          {/* DRC status chip */}
+          {store.viaDRCResult && (
+            <button
+              onClick={() => setActivePanel('via-drc')}
+              className={`flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border transition-colors ${
+                store.viaDRCResult.errorCount > 0
+                  ? 'bg-red-500/10 border-red-500/25 text-red-400'
+                  : store.viaDRCResult.warningCount > 0
+                  ? 'bg-amber-500/10 border-amber-500/25 text-amber-400'
+                  : 'bg-emerald-500/10 border-emerald-500/25 text-emerald-400'
+              }`}
+            >
+              {store.viaDRCResult.errorCount > 0
+                ? <><AlertCircle size={9} /> {store.viaDRCResult.errorCount} DRC err</>
+                : store.viaDRCResult.warningCount > 0
+                ? <><AlertCircle size={9} /> {store.viaDRCResult.warningCount} warn</>
+                : <><CheckCircle size={9} /> DRC pass</>
+              }
+            </button>
+          )}
+
+          <div className="flex-1" />
+
+          {/* Quick action buttons */}
+          <button
+            onClick={runDRC}
+            disabled={drcRunning}
+            className="text-[10px] text-white/40 hover:text-white/70 px-2 py-0.5 rounded
+                       bg-white/5 border border-white/10 hover:border-white/20 transition-colors
+                       disabled:opacity-40"
+          >
+            {drcRunning ? 'Running…' : 'Run DRC'}
+          </button>
+          <button
+            onClick={handleExport}
+            className="text-[10px] text-white/40 hover:text-white/70 px-2 py-0.5 rounded
+                       bg-white/5 border border-white/10 hover:border-white/20 transition-colors"
+          >
+            Export
+          </button>
         </div>
-        <div className="flex items-center gap-2 text-[10px] font-mono text-slate-600">
-          <span>History: {currentIndex + 1}/{history.length}</span>
-          <span>·</span>
-          <span>
-            {board.traces.filter(t => t.netId === 'vcc-3.3v').length} VCC traces
-          </span>
-          {showPDNAnalyzer && (
-            <>
-              <span>·</span>
-              <span className="text-cyan-500 flex items-center gap-1">
-                <Activity size={9} />
-                PDN active
-              </span>
-            </>
+
+        {/* ── Panel area ─────────────────────────────────────────────────────── */}
+        <div className="flex-1 flex min-h-0 overflow-hidden relative">
+          {/* Canvas panels */}
+          <div className="flex-1 min-w-0 flex min-h-0">
+            {/* Schematic */}
+            {(activePanel === 'schematic' || activePanel === 'split') && (
+              <div className={`${activePanel === 'split' ? 'w-1/2 border-r border-white/8' : 'flex-1'} min-h-0`}>
+                <SchematicCanvas
+                  board={board}
+                  selectedComponentId={store.selectedComponentId}
+                  onSelectComponent={store.setSelectedComponent}
+                />
+              </div>
+            )}
+
+            {/* PCB canvas */}
+            {(activePanel === 'pcb' || activePanel === 'split') && (
+              <div className={`${activePanel === 'split' ? 'w-1/2' : 'flex-1'} min-h-0`}>
+                <PCBCanvas
+                  board={board}
+                  selectedComponentId={store.selectedComponentId}
+                  selectedTraceId={store.selectedTraceId}
+                  selectedViaId={store.selectedViaId}
+                  onSelectComponent={store.setSelectedComponent}
+                  onSelectTrace={store.setSelectedTrace}
+                  onSelectVia={store.setSelectedVia}
+                  viaPlacementMode={viaPlacement.active ? viaPlacement.viaType : null}
+                  viaPlacementFrom={viaPlacement.fromLayer}
+                  viaPlacementTo={viaPlacement.toLayer}
+                  viaPlacementNet={viaPlacement.netId}
+                />
+              </div>
+            )}
+
+            {/* AI Chat panel */}
+            {activePanel === 'chat' && (
+              <div className="flex-1 min-h-0 bg-[#0f0f18]">
+                <div className="h-full flex flex-col">
+                  <div className="px-4 py-3 border-b border-white/8">
+                    <h2 className="text-sm font-semibold text-white/80">AI Copilot</h2>
+                    <p className="text-xs text-white/30 mt-0.5">Powered by Gemini</p>
+                  </div>
+                  <div className="flex-1 min-h-0">
+                    <ChatConsole board={board} />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Via DRC panel */}
+            {activePanel === 'via-drc' && (
+              <div className="flex-1 min-h-0 bg-[#0f0f18] overflow-y-auto">
+                <div className="p-4">
+                  <ViaDRCPanel
+                    drcResult={store.viaDRCResult}
+                    vias={vias}
+                    onRunDRC={runDRC}
+                    onSelectVia={(id) => {
+                      store.setSelectedVia(id);
+                      setActivePanel('pcb');
+                    }}
+                    isRunning={drcRunning}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* PDN Analyzer panel */}
+            {activePanel === 'pdn' && (
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <PDNAnalyzer board={board} />
+              </div>
+            )}
+          </div>
+
+          {/* ── Via Inspector (right sidebar overlay when via selected) ──────── */}
+          {selectedVia && (
+            <div className="w-72 flex-shrink-0 border-l border-white/8 bg-[#0f0f18] overflow-y-auto p-3">
+              <ViaInspector
+                via={selectedVia}
+                stackup={stackup}
+                onUpdate={store.updateVia}
+                onClose={() => store.setSelectedVia(null)}
+              />
+            </div>
+          )}
+
+          {/* ── Via Toolbar (floating) ───────────────────────────────────────── */}
+          {showViaToolbar && (
+            <div className="absolute bottom-4 right-4 z-30 shadow-2xl">
+              <ViaToolbar
+                stackup={stackup}
+                onActivate={activateViaPlacement}
+                onDeactivate={deactivateViaPlacement}
+                isActive={viaPlacement.active}
+                activeViaType={viaPlacement.active ? viaPlacement.viaType : null}
+              />
+            </div>
           )}
         </div>
       </div>
 
-      {/* ══════════ DIALOGS ══════════ */}
+      {/* ── IPC Stackup Drawer ─────────────────────────────────────────────── */}
+      <StackupDrawer
+        stackup={stackup}
+        vias={vias}
+        onStackupChange={(preset) => store.setStackupPreset(preset)}
+        isOpen={stackupOpen}
+        onClose={() => setStackupOpen(false)}
+      />
+
+      {/* ── Dialogs ──────────────────────────────────────────────────────────── */}
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
-      {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
-      {showOnboarding && (
-        <OnboardingDialog onClose={() => setShowOnboarding(false)} />
-      )}
+      {showHelp  && <HelpDialog  onClose={() => setShowHelp(false)}  />}
     </div>
   );
 };

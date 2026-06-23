@@ -1,28 +1,27 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        target: 'http://localhost:3001',
         changeOrigin: true,
       },
     },
   },
-  build: {
-    outDir: 'dist',
-    sourcemap: true,
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          react:  ['react', 'react-dom'],
-          zustand:['zustand'],
-          jszip:  ['jszip'],
-        },
-      },
+  test: {
+    // Vitest configuration (co-located with vite config per vitest convention)
+    globals: true,
+    environment: 'node',
+    include: ['src/**/__tests__/**/*.test.ts', 'src/**/*.test.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json', 'html'],
+      include: ['src/lib/**/*.ts'],
+      exclude: ['src/lib/__tests__/**'],
     },
   },
 });
